@@ -1,0 +1,2 @@
+6c9c878cb872929987db1092e76e7a4fdb905116a0ef26670660d8cac9b33e7a  CellBattery.zip
+ca1240671dbfcc721719a1293d922acbfbdf48bd3d99da9d6ab8ce3ccafd0b3f  CellBattery.exe

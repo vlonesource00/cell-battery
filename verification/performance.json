@@ -1,0 +1,199 @@
+{
+  "version": "1.0.3",
+  "collected": "2026-10-15",
+  "published": "2026-10-16",
+  "scenario": "Short visible-widget process sample, app history cache loaded",
+  "logicalProcessors": 8,
+  "windowsBuild": 26300,
+  "durationSeconds": 60.419,
+  "cpuSeconds": 0.046875,
+  "averageMachineCpuPercent": 0.009697901322431686,
+  "privateMiB": 6.379,
+  "workingSetMiB": 20.324,
+  "peakPrivateMiB": 6.379,
+  "peakWorkingSetMiB": 20.324,
+  "executableBytes": 317952,
+  "executableSha256": "ca1240671dbfcc721719a1293d922acbfbdf48bd3d99da9d6ab8ce3ccafd0b3f",
+  "samples": [
+    {
+      "ElapsedSeconds": 3.07,
+      "CpuSeconds": 0.0,
+      "CpuPercentOfMachine": 0.0,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.312,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 6.124,
+      "CpuSeconds": 0.0,
+      "CpuPercentOfMachine": 0.0,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.312,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 9.149,
+      "CpuSeconds": 0.015625,
+      "CpuPercentOfMachine": 0.02135,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.312,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 12.171,
+      "CpuSeconds": 0.015625,
+      "CpuPercentOfMachine": 0.01605,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.312,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 15.204,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.02569,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 18.225,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.02143,
+      "PrivateMiB": 6.371,
+      "WorkingSetMiB": 20.309,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 21.236,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.01839,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 24.246,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.01611,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 27.261,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.01433,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 30.274,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.0129,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 33.307,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.01173,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 36.323,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.01075,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 39.325,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.00993,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 42.334,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.00923,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.316,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 45.342,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.00862,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 48.361,
+      "CpuSeconds": 0.03125,
+      "CpuPercentOfMachine": 0.00808,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 51.372,
+      "CpuSeconds": 0.046875,
+      "CpuPercentOfMachine": 0.01141,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 54.384,
+      "CpuSeconds": 0.046875,
+      "CpuPercentOfMachine": 0.01077,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 57.394,
+      "CpuSeconds": 0.046875,
+      "CpuPercentOfMachine": 0.01021,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    },
+    {
+      "ElapsedSeconds": 60.419,
+      "CpuSeconds": 0.046875,
+      "CpuPercentOfMachine": 0.0097,
+      "PrivateMiB": 6.379,
+      "WorkingSetMiB": 20.324,
+      "Threads": 2,
+      "Handles": 189
+    }
+  ]
+}

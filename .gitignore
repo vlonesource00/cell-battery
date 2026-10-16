@@ -1,0 +1,11 @@
+data/
+build/
+*.exe
+*.obj
+*.res
+*.pdb
+*.csv
+*.bin
+*.new
+refresh.status
+__pycache__/

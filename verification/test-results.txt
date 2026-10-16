@@ -1,0 +1,58 @@
+PASS ETA formatting and unknown sentinel
+PASS ETA invalidation follows the displayed rounded-minute boundary
+PASS Recent drain waits for a full minute of capacity observations
+PASS Recent drain resolves a quantized 4.5 W capacity trend
+PASS Capacity-derived draw and fallback ETA replace a mismatched reported rate
+PASS Windows ETA retains priority over a recent-drain fallback
+PASS Sampling gaps discard stale drain estimates
+PASS An unchanged capacity counter never fabricates zero draw or an ETA
+PASS Insufficient capacity resolution keeps the reported-rate fallback
+PASS Rising capacity resets a discharge trend
+PASS A long observation stream remains bounded to the recent two-minute window
+PASS Unavailable capacity clears the recent estimate
+PASS Existing preferences migrate without losing position or display choices
+PASS Desktop pin preference survives a save and reload
+PASS SRUM UTC timestamp round trip
+PASS Reject invalid timestamps
+PASS Explicit timezone offsets
+PASS Stream CSV; quoted commas; aggregate same app and hour; omit old records
+PASS Prefer total energy without double counting CPU
+PASS Battery filter excludes plugged-in and unknown-source energy
+PASS Plugged-in filter remains separate from charging
+PASS All-source totals preserve unknown attribution
+PASS Recorded-hour filtering
+PASS UTF-16LE Windows exports
+PASS Sum recognized components; never invent missing power source
+PASS Exclude overlapping hardware-meter domains while retaining real EMI-named applications
+PASS Keep Windows unattributed energy outside app shares
+PASS UTF-8 BOM and supplementary Unicode app names
+PASS Bound app-hour cache size and preserve overflow energy in Other apps
+PASS Unsupported CSV schema produces a visible failure
+PASS Reject non-finite energy instead of creating misleading totals
+PASS Atomic cache write
+PASS Validate and read binary cache
+PASS Reject corrupt cache length and retain previous data
+PASS A completed hourly cache is detected and loaded without elevation
+PASS An on-demand scheduled refresh finishes when its cache arrives
+PASS An older scheduled cache cannot overwrite newer observations
+PASS A malformed scheduled cache preserves the current app history
+PASS Connect observed battery samples
+PASS Never interpolate across suspension or unobserved gaps
+PASS Long sampling gaps remain blank
+PASS Native compact client has fixed square dimensions
+PASS Expansion keeps the compact width and extends downward
+PASS Keyboard-accessible native button controls include desktop pin
+PASS Compact widget is twenty percent smaller at the current display DPI
+PASS Every detail control fits below the compact square
+PASS Desktop pin preserves screen position and attaches the widget as a child
+PASS Hidden top-level controller stays reachable while the widget is pinned
+PASS Unpin restores a normal floating window and its position
+PASS Partial wattage redraw exactly matches a full render
+PASS Visible widget uses the live two-second coalesced timer
+PASS Actual Windows timer delivers repeated live power samples
+PASS Hidden widget reduces sampling to five minutes
+PASS No sampling timer while display is off
+PASS No sampling timer while session is locked
+PASS No sampling timer during suspension
+
+56 passed, 0 failed.

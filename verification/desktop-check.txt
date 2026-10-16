@@ -1,0 +1,5 @@
+Desktop host: SHELLDLL_DefView
+PASS Attach hidden test widget to the actual desktop
+Pinned size: 326 x 326 px; DPI 144
+PASS Command controller remains a top-level window
+PASS Detach the test widget from the desktop
