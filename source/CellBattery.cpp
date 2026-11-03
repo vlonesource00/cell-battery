@@ -19,6 +19,7 @@
 #include <wtsapi32.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <sddl.h>
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -38,7 +39,9 @@
 
 using namespace Gdiplus;
 using std::wstring;
-constexpr int CW=272, HEIGHT=272, EXPANDED_HEIGHT=544;
+constexpr int CW=272, HEIGHT=320, DETAIL_HEIGHT=350, EXPANDED_HEIGHT=HEIGHT+DETAIL_HEIGHT;
+// Compact layout anchors (logical units before scaling).
+constexpr float TILE_Y=198, TILE_H=34, CHART_X=20, CHART_Y=244, CHART_W=232, CHART_H=38, LEGEND_Y=293;
 constexpr float WIDGET_SCALE=0.8f;
 constexpr uint64_t DAY=86400, HISTORY_DAYS=7;
 constexpr size_t MAX_HISTORY=12000, MAX_ENERGY=16384;
@@ -63,6 +66,16 @@ struct Power {
     bool recentDrain=false;
     uint32_t drainSpan=0;
     uint32_t capacityMWh=UINT32_MAX;
+    uint32_t fullSeconds=UINT32_MAX;
+    uint32_t remainingMWh=UINT32_MAX,fullMWh=UINT32_MAX;
+    bool drainCapable=false;
+};
+// Static-ish battery facts. Queried rarely (startup, resume, source change, hourly).
+struct BatteryFacts {
+    bool valid=false;
+    uint32_t designMWh=0,fullMWh=0,cycles=0;
+    uint64_t readAt=0;
+    int HealthPercent() const {return valid&&designMWh&&fullMWh?int(std::lround(100.0*fullMWh/designMWh)):-1;}
 };
 // Bounded, in-memory fuel-gauge trend. Never carry a trend across charging,
 // capacity recalibration, battery replacement, or a pause in observations.
@@ -150,6 +163,35 @@ struct BatteryMeter {
         capacity=status.Capacity;return true;
     }
 } meter;
+// Sums design and full-charge capacity across absolute-capacity system batteries.
+// Opens and closes handles immediately; nothing stays resident.
+BatteryFacts ReadBatteryFacts(){
+    BatteryFacts facts;
+    const GUID cls={0x72631e54,0x78a4,0x11d0,{0xbc,0xf7,0,0xaa,0,0xb7,0xb3,0x2a}};
+    HDEVINFO set=SetupDiGetClassDevsW(&cls,nullptr,nullptr,DIGCF_PRESENT|DIGCF_DEVICEINTERFACE);
+    if(set==INVALID_HANDLE_VALUE)return facts;
+    for(DWORD i=0;i<16;i++){
+        SP_DEVICE_INTERFACE_DATA iface{};iface.cbSize=sizeof(iface);
+        if(!SetupDiEnumDeviceInterfaces(set,nullptr,&cls,i,&iface))break;
+        DWORD size=0;SetupDiGetDeviceInterfaceDetailW(set,&iface,nullptr,0,&size,nullptr);
+        if(size<sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)||size>65536)continue;
+        std::vector<BYTE> buffer(size);auto* detail=reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());detail->cbSize=sizeof(*detail);
+        if(!SetupDiGetDeviceInterfaceDetailW(set,&iface,detail,size,nullptr,nullptr))continue;
+        HANDLE h=CreateFileW(detail->DevicePath,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(h==INVALID_HANDLE_VALUE)continue;
+        ULONG t=0;DWORD wait=0,returned=0;BATTERY_INFORMATION info{};BATTERY_QUERY_INFORMATION query{};
+        bool ok=DeviceIoControl(h,IOCTL_BATTERY_QUERY_TAG,&wait,sizeof(wait),&t,sizeof(t),&returned,nullptr)&&t;
+        query.BatteryTag=t;query.InformationLevel=BatteryInformation;
+        ok=ok&&DeviceIoControl(h,IOCTL_BATTERY_QUERY_INFORMATION,&query,sizeof(query),&info,sizeof(info),&returned,nullptr);
+        CloseHandle(h);
+        if(!ok||!(info.Capabilities&BATTERY_SYSTEM_BATTERY)||(info.Capabilities&BATTERY_CAPACITY_RELATIVE))continue;
+        if(info.DesignedCapacity==0||info.DesignedCapacity==UINT32_MAX||info.FullChargedCapacity==UINT32_MAX)continue;
+        facts.designMWh+=info.DesignedCapacity;facts.fullMWh+=info.FullChargedCapacity;
+        facts.cycles=std::max<uint32_t>(facts.cycles,info.CycleCount);facts.valid=true;
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return facts;
+}
 #pragma pack(push,1)
 struct Sample { uint64_t utc=0; int16_t percent=-1; uint8_t source=SourceUnknown, gap=0; };
 struct Energy { uint64_t hour=0,id=0; double mj=0; uint8_t source=SourceUnknown; wchar_t name[64]{}; };
@@ -157,13 +199,20 @@ struct EnergyHeader { uint32_t magic=0x31454342,version=1,count=0; uint64_t upda
 struct HistoryHeader { uint32_t magic=0x31484342,count=0; };
 struct LegacyPrefs { uint32_t magic=0x31504342; int32_t x=INT32_MIN,y=INT32_MIN; uint8_t top=0,expanded=0; };
 struct Prefs { uint32_t magic=0x32504342; int32_t x=INT32_MIN,y=INT32_MIN; uint8_t top=0,expanded=0,desktop=0; };
+// apps.bin: Windows' identity (path or package id) per app, used only to find icons.
+// Kept apart from energy.bin so older readers and the hourly helper stay compatible.
+struct AppPath { uint64_t id=0; wchar_t identity[260]{}; };
+struct AppsHeader { uint32_t magic=0x31414342,count=0; };
 #pragma pack(pop)
+constexpr size_t MAX_APP_PATHS=2048;
+constexpr int APP_ROWS=5;
 struct AppTotal { uint64_t id=0; wstring name; double mj=0; };
 struct UsageView {
-    std::array<double,24> battery{},plugged{},unknown{};
+    std::array<double,24> battery{},plugged{},unknown{},app{};
     std::array<uint64_t,24> hours{};
     std::vector<AppTotal> apps;
-    double total=0,unassigned=0;
+    double total=0,unassigned=0,day=0;
+    int Pages() const {return std::max(1,(int(apps.size())+APP_ROWS-1)/APP_ROWS);}
 };
 struct State {
     HWND window=nullptr,tooltip=nullptr,controller=nullptr,desktopHost=nullptr;
@@ -177,12 +226,19 @@ struct State {
     UINT timerInterval=0;
     uint64_t powerReads=0;
     Power power;
+    BatteryFacts facts;
+    bool hovering=false,tracking=false;float hoverX=0;
+    HICON trayIcon=nullptr;uint32_t trayKey=UINT32_MAX;bool lightTaskbar=false;
     Prefs prefs;
     std::vector<Sample> history;
     std::vector<Energy> energy;
     EnergyHeader energyHeader;
     UsageView view;
     int filter=0,selected=-1,page=0;
+    bool appSelected=false;uint64_t appId=0;wstring appName;
+    int hoverRow=-1,hoverHour=-1;
+    std::map<uint64_t,wstring> appPaths;
+    std::map<uint64_t,std::unique_ptr<Bitmap>> icons;
     uint64_t lastSave=0,lastSample=0,viewHour=0;
     uint64_t cacheCheck=0,scheduledRequest=0;
     FILETIME scheduledStamp{},scheduledStatusStamp{};
@@ -198,7 +254,8 @@ struct State {
 wstring root,data;
 const Color BG(255,19,25,26), PANEL(255,25,32,33), LINE(255,43,53,53),
     FG(255,236,243,236), MUTED(255,146,164,157), GREEN(255,183,235,171),
-    GOLD(255,237,192,121), BLUE(255,144,173,189), TRACK(255,39,51,47);
+    GOLD(255,237,192,121), BLUE(255,144,173,189), TRACK(255,39,51,47), RED(255,240,134,118);
+constexpr int LOW_PERCENT=20;
 
 uint64_t Now() { FILETIME ft; GetSystemTimeAsFileTime(&ft); ULARGE_INTEGER u;u.LowPart=ft.dwLowDateTime;u.HighPart=ft.dwHighDateTime;return u.QuadPart/10000000ULL-11644473600ULL; }
 FILETIME FileTime(uint64_t utc) { ULARGE_INTEGER u;u.QuadPart=(utc+11644473600ULL)*10000000ULL;return FILETIME{u.LowPart,u.HighPart}; }
@@ -258,9 +315,16 @@ Power ReadPower() {
     SYSTEM_BATTERY_STATE b{};
     if(CallNtPowerInformation(SystemBatteryState,nullptr,0,&b,sizeof(b))==0&&b.BatteryPresent) {
         if(p.source==Battery&&!p.windowsEta&&b.EstimatedTime!=UINT32_MAX&&b.EstimatedTime>0){p.seconds=b.EstimatedTime;p.windowsEta=true;}
+        if(b.RemainingCapacity!=UINT32_MAX&&b.RemainingCapacity>0)p.remainingMWh=b.RemainingCapacity;
+        if(b.MaxCapacity!=UINT32_MAX&&b.MaxCapacity>0)p.fullMWh=b.MaxCapacity;
         const int64_t rate=static_cast<int32_t>(b.Rate);
         if(b.Rate!=0x80000000u&&b.Rate!=UINT32_MAX&&rate!=0&&std::abs(rate)<500000) {
             p.watts=p.reportedWatts=std::abs(rate)/1000.0;
+            // Linear time-to-full. Real charging tapers near the top, so this is a floor.
+            if(p.source==Charging&&rate>0&&p.remainingMWh!=UINT32_MAX&&p.fullMWh!=UINT32_MAX&&p.fullMWh>p.remainingMWh){
+                double estimate=3600.0*(p.fullMWh-p.remainingMWh)/rate;
+                if(estimate>0&&estimate<2*86400)p.fullSeconds=uint32_t(estimate);
+            }
             if(p.source==Battery&&!p.windowsEta) {
                 if(b.EstimatedTime!=UINT32_MAX&&b.EstimatedTime>0){p.seconds=b.EstimatedTime;p.windowsEta=true;}
                 else if(b.Discharging&&rate<0&&b.RemainingCapacity!=UINT32_MAX&&b.RemainingCapacity>0) {
@@ -276,6 +340,7 @@ Power ReadPower() {
             p.capacityMWh=capacity;
             if(meter.trend.Add(tick,capacity,watts,span))ApplyRecentDrain(p,capacity,watts,span);
         }else meter.trend.Reset();
+        p.drainCapable=meter.device!=INVALID_HANDLE_VALUE;
     }else meter.trend.Reset();
     return p;
 }
@@ -305,8 +370,8 @@ void RecordPower(uint64_t now,bool force=false) {
     if(!g.history.empty()){
         const Sample& last=g.history.back();
         if(now<last.utc)return;
-        if(!force&&!transition&&now-last.utc<300)return;
-        s.gap=g.historyGap||now-last.utc>360;
+        if(!force&&!transition&&now-last.utc<290)return; // Slack for coalesced timers firing slightly early.
+        s.gap=g.historyGap||now-last.utc>660;
     }else s.gap=1;
     g.historyGap=false;
     auto first=std::lower_bound(g.history.begin(),g.history.end(),now>HISTORY_DAYS*DAY?now-HISTORY_DAYS*DAY:0,[](const Sample&a,uint64_t t){return a.utc<t;});
@@ -352,17 +417,20 @@ void BuildView(uint64_t now) {
     std::map<uint64_t,AppTotal> totals;
     for(const auto& e:g.energy){
         if(e.hour<v.hours[0]||e.hour>hour)continue;
-        int i=static_cast<int>((e.hour-v.hours[0])/3600);
-        if(e.source==Battery)v.battery[i]+=e.mj;else if(e.source==Plugged)v.plugged[i]+=e.mj;else v.unknown[i]+=e.mj;
-        if(g.selected>=0&&i!=g.selected)continue;
+        // The chart and the list share the source filter so they always describe the same energy.
         if(g.filter==0&&e.source!=Battery)continue;
         if(g.filter==1&&e.source!=Plugged)continue;
+        int i=static_cast<int>((e.hour-v.hours[0])/3600);
+        if(e.source==Battery)v.battery[i]+=e.mj;else if(e.source==Plugged)v.plugged[i]+=e.mj;else v.unknown[i]+=e.mj;
+        v.day+=e.mj;
+        if(g.appSelected&&e.id==g.appId)v.app[i]+=e.mj;
+        if(g.selected>=0&&i!=g.selected)continue;
         if(e.id==UNATTRIBUTED_ID){v.unassigned+=e.mj;continue;}
         auto& a=totals[e.id];a.id=e.id;a.name=e.name;a.mj+=e.mj;v.total+=e.mj;
     }
     for(auto& kv:totals)if(kv.second.mj>0)v.apps.push_back(std::move(kv.second));
     std::sort(v.apps.begin(),v.apps.end(),[](const AppTotal&a,const AppTotal&b){return a.mj>b.mj;});
-    int maxPage=std::max(0,(static_cast<int>(v.apps.size())-1)/3);g.page=std::min(g.page,maxPage);
+    g.page=std::clamp(g.page,0,v.Pages()-1);
     g.view=std::move(v);
 }
 
@@ -434,8 +502,8 @@ wstring AppName(wstring s){
     for(auto& pair:friendly)if(_wcsicmp(s.c_str(),pair.first)==0){s=pair.second;break;}
     if(s.empty())s=L"System";if(s.size()>63)s.resize(63);return s;
 }
-bool ParseEnergy(const wstring& path,uint64_t now,std::vector<Energy>& output,EnergyHeader& head,wstring& error) {
-    CsvReader csv(path);std::vector<wstring> fields;std::vector<wstring> names;
+bool ParseEnergy(const wstring& path,uint64_t now,std::vector<Energy>& output,EnergyHeader& head,wstring& error,std::vector<AppPath>* identities=nullptr) {
+    CsvReader csv(path);std::vector<wstring> fields;std::vector<wstring> names;std::map<uint64_t,wstring> seen;
     int app=-1,time=-1,source=-1,total=-1;std::vector<int> components;bool schema=false;
     std::map<std::tuple<uint64_t,uint64_t,uint8_t>,Energy> aggregate;
     uint64_t latest=0;size_t accepted=0,invalid=0;
@@ -472,6 +540,7 @@ bool ParseEnergy(const wstring& path,uint64_t now,std::vector<Energy>& output,En
         auto key=std::make_tuple(hour,id,src);wstring name=unassigned?L"Windows / unattributed":AppName(identity);
         if(aggregate.size()>=MAX_ENERGY-72&&aggregate.find(key)==aggregate.end()){id=0;name=L"Other apps";key=std::make_tuple(hour,id,src);}
         auto& e=aggregate[key];e.hour=hour;e.id=id;e.source=src;e.mj+=mj;wcsncpy(e.name,name.c_str(),63);e.name[63]=0;
+        if(identities&&id&&id!=UNATTRIBUTED_ID&&identity.size()<260&&seen.size()<MAX_APP_PATHS)seen.emplace(id,identity);
         latest=std::max(latest,stamp);++accepted;
     }
     if(csv.error){error=L"Windows history was unreadable or malformed.";return false;}
@@ -479,7 +548,26 @@ bool ParseEnergy(const wstring& path,uint64_t now,std::vector<Energy>& output,En
     if(invalid&&accepted==0){error=L"Windows exported records that could not be read.";return false;}
     std::vector<Energy> result;result.reserve(aggregate.size());for(auto& kv:aggregate)result.push_back(kv.second);
     output.swap(result);head=EnergyHeader{};head.count=uint32_t(output.size());head.updated=now;head.latest=latest;
+    if(identities){identities->clear();for(auto& kv:seen){AppPath p;p.id=kv.first;wcsncpy(p.identity,kv.second.c_str(),259);identities->push_back(p);}}
     return true;
+}
+bool WriteAppPaths(const wstring& folder,const std::vector<AppPath>& paths){
+    AppsHeader h;h.count=uint32_t(paths.size());
+    return AtomicWrite(folder+L"\\apps.bin",&h,sizeof(h),paths.data(),DWORD(paths.size()*sizeof(AppPath)));
+}
+bool ReadAppPaths(const wstring& folder,std::map<uint64_t,wstring>& target){
+    HANDLE f=CreateFileW((folder+L"\\apps.bin").c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    if(f==INVALID_HANDLE_VALUE)return false;
+    AppsHeader h;LARGE_INTEGER size{};bool ok=false;
+    if(GetFileSizeEx(f,&size)&&ExactRead(f,&h,sizeof(h))&&h.magic==0x31414342&&h.count<=MAX_APP_PATHS&&size.QuadPart==sizeof(h)+h.count*sizeof(AppPath)){
+        std::vector<AppPath> v(h.count);
+        if(ExactRead(f,v.data(),DWORD(v.size()*sizeof(AppPath)))){
+            std::map<uint64_t,wstring> m;ok=true;
+            for(auto& p:v){if(!wmemchr(p.identity,0,260)){ok=false;break;}m[p.id]=p.identity;}
+            if(ok)target.swap(m);
+        }
+    }
+    CloseHandle(f);return ok;
 }
 void WriteStatus(const wstring& s) {
     uint32_t length=uint32_t(s.size());AtomicWrite(data+L"\\refresh.status",&length,sizeof(length),s.c_str(),length*sizeof(wchar_t));
@@ -502,6 +590,12 @@ bool CheckScheduledCache(uint64_t now,bool force=false){
             if(header.updated>=g.energyHeader.updated){
                 g.energy.swap(records);g.energyHeader=header;g.notice.clear();changed=true;
                 if(!g.readOnly)AtomicWrite(data+L"\\energy.bin",&header,sizeof(header),g.energy.data(),DWORD(g.energy.size()*sizeof(Energy)));
+                // Older hourly helpers do not write apps.bin; keep any icons we already know.
+                std::map<uint64_t,wstring> paths;
+                if(ReadAppPaths(g.scheduledFolder,paths)){
+                    g.appPaths.swap(paths);
+                    if(!g.readOnly){std::vector<AppPath> list;for(auto& kv:g.appPaths){AppPath p;p.id=kv.first;wcsncpy(p.identity,kv.second.c_str(),259);list.push_back(p);}WriteAppPaths(data,list);}
+                }
             }
             if(g.scheduledPending){g.scheduledPending=false;g.refreshing=false;changed=true;}
         }
@@ -529,8 +623,10 @@ int ExportEnergy() {
     if(launched){CloseHandle(pi.hThread);DWORD wait=WaitForSingleObject(pi.hProcess,60000);if(wait!=WAIT_OBJECT_0){TerminateProcess(pi.hProcess,ERROR_TIMEOUT);WaitForSingleObject(pi.hProcess,5000);exit=ERROR_TIMEOUT;}else GetExitCodeProcess(pi.hProcess,&exit);CloseHandle(pi.hProcess);}
     int result=1;wstring error;
     if(launched&&exit==0){
-        std::vector<Energy> records;EnergyHeader h;
-        if(ParseEnergy(temp,Now(),records,h,error)){
+        std::vector<Energy> records;EnergyHeader h;std::vector<AppPath> identities;
+        if(ParseEnergy(temp,Now(),records,h,error,&identities)){
+            // apps.bin first: a reader that sees the new energy.bin should find matching icons.
+            WriteAppPaths(data,identities);
             if(AtomicWrite(data+L"\\energy.bin",&h,sizeof(h),records.data(),DWORD(records.size()*sizeof(Energy)))){WriteStatus(L"");result=0;}else error=L"Cannot save the app cache. Move Cell to a writable folder.";
         }
     }else error=exit==ERROR_TIMEOUT?L"Windows history took too long. Your previous cache is kept.":L"Windows denied or could not export app history. Try Refresh as administrator, or use Windows battery settings.";
@@ -562,143 +658,315 @@ void PinIcon(Graphics& gr,float x,float y,Color c){
     Stroke(gr,x-2,y,x-5,y+3,c);Stroke(gr,x+2,y,x+5,y+3,c);Stroke(gr,x-5,y+3,x+5,y+3,c);Stroke(gr,x,y+3,x,y+8,c);
 }
 void RefreshIcon(Graphics& gr,float x,float y,Color c){Pen p(c,1.5f);gr.DrawArc(&p,x-6.f,y-6.f,12.f,12.f,30.f,280.f);Stroke(gr,x+6,y-5,x+6,y,c,1.5f);Stroke(gr,x+6,y-5,x+1,y-5,c,1.5f);}
-bool CanJoin(const Sample&a,const Sample&b){return !b.gap&&b.utc>a.utc&&b.utc-a.utc<=360&&a.percent>=0&&b.percent>=0;}
+bool CanJoin(const Sample&a,const Sample&b){return !b.gap&&b.utc>a.utc&&b.utc-a.utc<=660&&a.percent>=0&&b.percent>=0;}
 Color SourceColor(uint8_t source){return source==Battery?GREEN:source==Charging?GOLD:source==Plugged?BLUE:MUTED;}
+const wchar_t* SourceName(uint8_t source){return source==Battery?L"on battery":source==Charging?L"charging":source==Plugged?L"plugged in":L"source unknown";}
+bool IsLow(){return g.power.source==Battery&&g.power.percent>=0&&g.power.percent<=LOW_PERCENT;}
+Color StateColor(){return IsLow()?RED:SourceColor(g.power.source);}
+float ChartX(uint64_t utc,uint64_t start){return CHART_X+CHART_W*float(double(utc-start)/DAY);}
+float ChartY(int percent){return CHART_Y+CHART_H-CHART_H*percent/100.f;}
+// Nearest recorded sample to a chart x position, within about one sampling interval.
+const Sample* HistoryAt(float x,uint64_t now){
+    uint64_t start=now-DAY;double target=double(start)+double(x-CHART_X)/CHART_W*DAY,bestGap=420;const Sample* best=nullptr;
+    for(auto& s:g.history){if(s.utc<start||s.utc>now)continue;double d=std::abs(double(s.utc)-target);if(d<bestGap){bestGap=d;best=&s;}}
+    return best;
+}
 void PaintHistory(Graphics& gr,uint64_t now) {
-    const float x=20,y=203,w=232,h=29;
+    const float x=CHART_X,y=CHART_Y,w=CHART_W,h=CHART_H;
+    Pen grid(LINE,1);grid.SetDashStyle(DashStyleDot);
+    gr.DrawLine(&grid,x,y,x+w,y);gr.DrawLine(&grid,x,y+h/2,x+w,y+h/2);
     Stroke(gr,x,y+h,x+w,y+h,LINE);
     bool drawn=false;uint64_t start=now-DAY;
-    for(size_t i=1;i<g.history.size();i++){
-        auto&a=g.history[i-1];auto&b=g.history[i];if(a.utc<start||b.utc>now||!CanJoin(a,b))continue;
-        float ax=x+w*float(double(a.utc-start)/DAY),bx=x+w*float(double(b.utc-start)/DAY);
-        float ay=y+h-h*a.percent/100.f,by=y+h-h*b.percent/100.f;
-        Stroke(gr,ax,ay,bx,by,SourceColor(a.source),1.7f);drawn=true;
+    // Each run of joinable, same-source samples gets a soft area fill and one polyline.
+    for(size_t i=1;i<g.history.size();){
+        auto& a=g.history[i-1];auto& b=g.history[i];
+        if(a.utc<start||b.utc>now||!CanJoin(a,b)){++i;continue;}
+        uint8_t source=a.source;std::vector<PointF> points{PointF(ChartX(a.utc,start),ChartY(a.percent))};size_t j=i;
+        while(j<g.history.size()&&g.history[j-1].source==source&&g.history[j].utc<=now&&CanJoin(g.history[j-1],g.history[j])){
+            points.emplace_back(ChartX(g.history[j].utc,start),ChartY(g.history[j].percent));++j;
+        }
+        std::vector<PointF> area(points);area.emplace_back(points.back().X,y+h);area.emplace_back(points.front().X,y+h);
+        SolidBrush fill(Tint(SourceColor(source),38));gr.FillPolygon(&fill,area.data(),int(area.size()));
+        Pen line(SourceColor(source),1.7f);line.SetLineJoin(LineJoinRound);line.SetStartCap(LineCapRound);line.SetEndCap(LineCapRound);
+        gr.DrawLines(&line,points.data(),int(points.size()));drawn=true;i=j;
     }
-    if(!drawn)TextAt(gr,L"Battery history starts here",x,y+4,w,0,MUTED);
-    else if(!g.history.empty()){
-        auto&s=g.history.back();if(s.utc>=start&&s.utc<=now){SolidBrush b(SourceColor(s.source));gr.FillEllipse(&b,x+w*float(double(s.utc-start)/DAY)-2,y+h-h*s.percent/100.f-2,4.f,4.f);}
+    if(!drawn)TextAt(gr,L"History builds while Cell runs",x,y+h/2-7,w,0,MUTED);
+    else if(!g.history.empty()&&!g.hovering){
+        auto&s=g.history.back();if(s.utc>=start&&s.utc<=now){SolidBrush b(SourceColor(s.source));gr.FillEllipse(&b,ChartX(s.utc,start)-2.5f,ChartY(s.percent)-2.5f,5.f,5.f);}
     }
+    if(g.hovering){
+        const Sample* s=HistoryAt(g.hoverX,now);float hx=s?ChartX(s->utc,start):g.hoverX;
+        Stroke(gr,hx,y-2,hx,y+h,Tint(FG,90),1);
+        if(s){SolidBrush ring(BG),dot(SourceColor(s->source));gr.FillEllipse(&ring,hx-4.f,ChartY(s->percent)-4.f,8.f,8.f);gr.FillEllipse(&dot,hx-2.5f,ChartY(s->percent)-2.5f,5.f,5.f);}
+    }
+}
+void PaintLegend(Graphics& gr,uint64_t now){
+    if(g.hovering){
+        const Sample* s=HistoryAt(g.hoverX,now);
+        if(s){
+            wstring text=Clock(s->utc)+L"  "+std::to_wstring(s->percent)+L"% · "+SourceName(s->source);
+            TextAt(gr,text,20,LEGEND_Y,205,1,SourceColor(s->source));
+        }else{
+            uint64_t t=now-DAY+uint64_t(double(std::clamp(g.hoverX,CHART_X,CHART_X+CHART_W)-CHART_X)/CHART_W*DAY);
+            TextAt(gr,Clock(t)+L"  not recorded",20,LEGEND_Y,205,1,MUTED);
+        }
+        return;
+    }
+    TextAt(gr,L"24h",20,LEGEND_Y+1,26,0,MUTED);
+    const std::pair<Color,const wchar_t*> keys[]={{GREEN,L"Battery"},{GOLD,L"Charging"},{BLUE,L"Plugged"}};
+    float kx=48;
+    for(auto& k:keys){SolidBrush b(k.first);gr.FillEllipse(&b,kx,LEGEND_Y+6,4.f,4.f);TextAt(gr,k.second,kx+8,LEGEND_Y+1,52,0,MUTED);kx+=k.second[0]==L'C'?58.f:50.f;}
+}
+wstring Wh(uint32_t mwh){if(mwh==UINT32_MAX||mwh==0)return L"—";wchar_t b[24];swprintf(b,24,mwh>=100000?L"%.0f Wh":L"%.1f Wh",mwh/1000.0);return b;}
+void Tile(Graphics& gr,float x,float w,const wchar_t* label,const wstring& value,Color color){
+    Rounded(gr,RectF(x,TILE_Y,w,TILE_H),6,TRACK);
+    TextAt(gr,label,x+8,TILE_Y+5,w-12,0,MUTED);
+    TextAt(gr,value,x+8,TILE_Y+17,w-12,2,color);
+}
+void PaintTiles(Graphics& gr){
+    const float gap=6,w=(CHART_W-2*gap)/3;wchar_t b[32];
+    int health=g.facts.HealthPercent();wstring healthText=L"—";Color healthColor=FG;
+    if(health>0){swprintf(b,32,L"%d%%",std::min(health,100));healthText=b;healthColor=health>=80?FG:health>=60?GOLD:RED;}
+    Tile(gr,CHART_X,w,L"HEALTH",healthText,healthColor);
+    uint32_t remaining=g.power.remainingMWh!=UINT32_MAX?g.power.remainingMWh:g.power.capacityMWh;
+    Tile(gr,CHART_X+w+gap,w,L"STORED",Wh(remaining),FG);
+    if(g.facts.valid&&g.facts.cycles>0)Tile(gr,CHART_X+2*(w+gap),w,L"CYCLES",std::to_wstring(g.facts.cycles),FG);
+    else Tile(gr,CHART_X+2*(w+gap),w,L"FULL",Wh(g.power.fullMWh!=UINT32_MAX?g.power.fullMWh:g.facts.fullMWh),FG);
 }
 wstring StatusText(){
     if(!g.power.valid)return L"Power status unavailable";
     if(!g.power.present)return L"No battery detected";
     if(g.power.source==Charging)return L"Charging";
-    if(g.power.source==Plugged)return g.power.percent==100?L"Fully charged":L"Plugged in";
-    if(g.power.source==Battery)return g.power.saver?L"On battery · saver on":L"On battery";
+    if(g.power.source==Plugged)return g.power.percent>=100?L"Fully charged":L"Plugged in";
+    if(g.power.source==Battery){
+        if(IsLow())return g.power.saver?L"Low battery · saver on":L"Low battery";
+        return g.power.saver?L"On battery · saver on":L"On battery";
+    }
     return L"Power source unknown";
 }
 wstring MainEta(){
     if(!g.power.present)return L"Battery unavailable";
-    if(g.power.source==Charging)return L"Recharging";
-    if(g.power.source==Plugged)return L"Ready when you are";
+    if(g.power.source==Charging)return g.power.fullSeconds!=UINT32_MAX?L"Full in "+EtaText(g.power.fullSeconds):L"Charging";
+    if(g.power.source==Plugged)return g.power.percent>=100?L"On AC power":L"Charging paused";
     if(g.power.source==SourceUnknown)return L"Waiting for Windows";
     return EtaText(g.power.seconds)+(g.power.seconds!=UINT32_MAX&&g.power.seconds>0?L" left":L"");
 }
 wstring EtaLabel(){
     if(!g.power.present)return L"A system battery is required";
-    if(g.power.source==Charging)return L"External power connected";
-    if(g.power.source==Plugged)return L"Battery is not discharging";
+    if(g.power.source==Charging)return g.power.fullSeconds!=UINT32_MAX?L"At current rate · charging slows near full":L"Windows has not reported a charge rate";
+    if(g.power.source==Plugged)return g.power.percent>=100?L"Battery is full and resting":L"Held by a charge limit or smart charging";
     if(g.power.source==SourceUnknown)return L"Windows has not reported the source";
-    if(g.power.windowsEta)return g.power.recentDrain?L"Windows ETA · recent-average draw":L"Windows remaining-time estimate";
-    if(g.power.recentDrain)return L"Recent drain (1–2 min) · estimated ETA";
-    if(g.power.seconds!=UINT32_MAX)return L"Reported-rate estimate · warming up";
-    return L"Learning recent battery drain…";
+    if(g.power.windowsEta)return g.power.recentDrain?L"Windows estimate · recent draw averaged":L"Windows remaining-time estimate";
+    if(g.power.recentDrain)return L"From the last 1–2 min of drain";
+    if(g.power.seconds!=UINT32_MAX)return g.power.drainCapable?L"From reported rate · refining…":L"From Windows' reported discharge rate";
+    return g.power.drainCapable?L"Measuring recent drain…":L"Waiting for a Windows estimate…";
+}
+// ---- Energy-by-app panel (coordinates are relative to the panel top, HEIGHT) ----
+constexpr float U_SEG_Y=54,U_LABEL_Y=90,U_CHART_Y=110,U_CHART_H=40,U_LIST_Y=180,U_ROW_H=27,U_FOOT_Y=320;
+void TextCenter(Graphics& gr,const wstring& s,float x,float y,float width,int font,Color color){
+    StringFormat fmt(StringFormat::GenericTypographic());fmt.SetFormatFlags(StringFormatFlagsNoWrap);fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+    fmt.SetAlignment(StringAlignmentCenter);SolidBrush b(color);gr.DrawString(s.c_str(),int(s.size()),g.fonts[font].get(),RectF(x,y,width,76),&fmt,&b);
+}
+// Readable names at display time, so caches written by older versions benefit too.
+wstring DisplayName(const wstring& raw){
+    static const std::pair<const wchar_t*,const wchar_t*> friendly[]={
+        {L"claude",L"Claude"},{L"discord",L"Discord"},{L"slack",L"Slack"},{L"ms-teams",L"Microsoft Teams"},{L"msteams",L"Microsoft Teams"},
+        {L"steam",L"Steam"},{L"steamwebhelper",L"Steam"},{L"obs64",L"OBS Studio"},{L"vlc",L"VLC"},{L"notepad",L"Notepad"},
+        {L"windowsterminal",L"Windows Terminal"},{L"virtualboxvm",L"VirtualBox VM"},{L"zoom",L"Zoom"},{L"msedgewebview2",L"Edge WebView"},
+        {L"searchhost",L"Windows Search"},{L"olk",L"Outlook"},{L"outlook",L"Outlook"},{L"winword",L"Word"},{L"excel",L"Excel"},
+        {L"powerpnt",L"PowerPoint"},{L"taskmgr",L"Task Manager"},{L"onedrive",L"OneDrive"},{L"whatsapp",L"WhatsApp"},{L"telegram",L"Telegram"},
+        {L"devenv",L"Visual Studio"},{L"python",L"Python"},{L"pythonw",L"Python"},{L"node",L"Node.js"},{L"javaw",L"Java"},{L"java",L"Java"},
+        {L"powershell",L"PowerShell"},{L"pwsh",L"PowerShell"},{L"cmd",L"Command Prompt"},{L"msmpeng",L"Defender antivirus"},
+        {L"firefox",L"Firefox"},{L"chrome",L"Google Chrome"},{L"msedge",L"Microsoft Edge"},{L"code",L"Visual Studio Code"}
+    };
+    for(auto& p:friendly)if(_wcsicmp(raw.c_str(),p.first)==0)return p.second;
+    // Packaged ids read Publisher.Product (Mozilla.Firefox): show the product, CamelCase split.
+    auto dot=raw.find_last_of(L'.');
+    if(dot!=wstring::npos&&dot>0&&dot+1<raw.size()&&raw.find(L' ')==wstring::npos&&iswupper(raw[0])&&iswupper(raw[dot+1])){
+        wstring tail=raw.substr(dot+1);
+        for(auto& p:friendly)if(_wcsicmp(tail.c_str(),p.first)==0)return p.second;
+        wstring out;for(size_t i=0;i<tail.size();i++){if(i&&iswupper(tail[i])&&iswlower(tail[i-1]))out+=L' ';out+=tail[i];}
+        return out;
+    }
+    // Executable names are often all lowercase (rustdesk): capitalise the first letter only.
+    if(!raw.empty()&&iswlower(raw[0])&&std::none_of(raw.begin(),raw.end(),[](wchar_t c){return iswupper(c);})){wstring out=raw;out[0]=towupper(out[0]);return out;}
+    return raw;
+}
+Color AvatarColor(uint64_t id){
+    const Color palette[]={GREEN,BLUE,GOLD,Color(255,196,170,231),Color(255,129,212,207),Color(255,236,164,176)};
+    return palette[(id^(id>>29))%6];
+}
+// Turns a SRUM identity into something the shell can parse: a DOS path or a packaged-app AUMID.
+wstring ShellParsingName(const wstring& identity){
+    if(identity.empty())return L"";
+    if(identity.find(L'!')!=wstring::npos&&identity.find_first_of(L"\\/")==wstring::npos)return L"shell:AppsFolder\\"+identity;
+    if(identity.size()>3&&identity[1]==L':'&&identity[2]==L'\\')return identity;
+    if(_wcsnicmp(identity.c_str(),L"\\Device\\",8)==0){
+        static std::vector<std::pair<wstring,wstring>> drives;static bool loaded=false;
+        if(!loaded){loaded=true;for(wchar_t d=L'A';d<=L'Z';d++){wchar_t name[3]={d,L':',0},target[512];if(QueryDosDeviceW(name,target,512))drives.emplace_back(target,name);}}
+        for(auto& drive:drives)
+            if(identity.size()>drive.first.size()&&_wcsnicmp(identity.c_str(),drive.first.c_str(),drive.first.size())==0&&identity[drive.first.size()]==L'\\')
+                return drive.second+identity.substr(drive.first.size());
+    }
+    return L"";
+}
+std::unique_ptr<Bitmap> BitmapFromHBITMAP(HBITMAP source){
+    BITMAP bm{};if(!GetObjectW(source,sizeof(bm),&bm)||bm.bmWidth<=0||bm.bmHeight<=0||bm.bmWidth>256||bm.bmHeight>256)return nullptr;
+    int w=bm.bmWidth,h=bm.bmHeight;BITMAPINFO bi{};bi.bmiHeader.biSize=sizeof(bi.bmiHeader);bi.bmiHeader.biWidth=w;bi.bmiHeader.biHeight=-h;
+    bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;
+    std::vector<uint32_t> pixels(size_t(w)*h);HDC dc=GetDC(nullptr);int rows=GetDIBits(dc,source,0,h,pixels.data(),&bi,DIB_RGB_COLORS);ReleaseDC(nullptr,dc);
+    if(rows!=h)return nullptr;
+    bool alpha=false;for(auto p:pixels)if(p>>24){alpha=true;break;}
+    if(!alpha)for(auto& p:pixels)p|=0xff000000;
+    auto out=std::make_unique<Bitmap>(w,h,PixelFormat32bppPARGB);BitmapData d{};Rect r(0,0,w,h);
+    if(out->LockBits(&r,ImageLockModeWrite,PixelFormat32bppPARGB,&d)!=Ok)return nullptr;
+    for(int y=0;y<h;y++)memcpy(static_cast<BYTE*>(d.Scan0)+y*d.Stride,pixels.data()+size_t(y)*w,size_t(w)*4);
+    out->UnlockBits(&d);return out;
+}
+// Icons load lazily for visible rows only and are cached (failures too) for the session.
+Bitmap* AppIcon(uint64_t id){
+    auto found=g.icons.find(id);if(found!=g.icons.end())return found->second.get();
+    std::unique_ptr<Bitmap> icon;auto path=g.appPaths.find(id);
+    if(path!=g.appPaths.end()){
+        wstring name=ShellParsingName(path->second);IShellItemImageFactory* factory=nullptr;
+        if(!name.empty()&&SUCCEEDED(SHCreateItemFromParsingName(name.c_str(),nullptr,IID_PPV_ARGS(&factory)))){
+            HBITMAP bitmap=nullptr;
+            if(SUCCEEDED(factory->GetImage(SIZE{32,32},SIIGBF_ICONONLY|SIIGBF_BIGGERSIZEOK,&bitmap))&&bitmap){icon=BitmapFromHBITMAP(bitmap);DeleteObject(bitmap);}
+            factory->Release();
+        }
+    }
+    if(g.icons.size()>=64)g.icons.clear();
+    Bitmap* raw=icon.get();g.icons[id]=std::move(icon);return raw;
+}
+Color FilterAccent(){return g.filter==1?BLUE:GREEN;}
+double HourEnergy(int i){return g.view.battery[i]+g.view.plugged[i]+g.view.unknown[i];}
+int UsageHourAt(float x){return x<20||x>=252?-1:std::clamp(int((x-20)/(232.f/24)),0,23);}
+wstring UsageFreshness(uint64_t now){
+    if(g.refreshing)return L"Refreshing Windows history…";
+    if(!g.notice.empty())return L"Refresh issue · details in the menu";
+    if(!g.energyHeader.updated)return L"Windows' own estimates · refresh to load";
+    auto age=now>=g.energyHeader.updated?(now-g.energyHeader.updated)/60:0;
+    wstring s=age<1?L"Updated just now":age<60?L"Updated "+std::to_wstring(age)+L"m ago":L"Updated "+std::to_wstring(age/60)+L"h ago";
+    return s+(g.hourlyAvailable?L" · refreshes hourly":L" · refresh on demand");
 }
 void PaintUsage(Graphics& gr,uint64_t now){
     auto state=gr.Save();gr.TranslateTransform(0,float(HEIGHT));
-    SolidBrush pb(PANEL);gr.FillRectangle(&pb,0.f,0.f,float(CW),float(HEIGHT));Stroke(gr,20,0,252,0,LINE);
-    TextAt(gr,L"Energy by app",20,18,190,3,FG);
-    TextAt(gr,g.selected<0?L"LAST 24 CLOCK HOURS":L"RECORDED AT "+Clock(g.view.hours[g.selected]),20,79,200,0,MUTED);
-    const float x=20,y=101,w=232,h=29,step=w/24;
-    double peak=0;for(int i=0;i<24;i++)peak=std::max(peak,g.view.battery[i]+g.view.plugged[i]+g.view.unknown[i]);
+    SolidBrush pb(PANEL);gr.FillRectangle(&pb,0.f,0.f,float(CW),float(DETAIL_HEIGHT));Stroke(gr,20,0,252,0,LINE);
+    Color accent=FilterAccent();
+    TextAt(gr,L"Energy by app",20,14,190,3,FG);
+    TextAt(gr,UsageFreshness(now),20,34,196,0,g.notice.empty()?MUTED:GOLD);
+    Rounded(gr,RectF(20,U_SEG_Y,232,26),8,TRACK); // Segmented-control track; the filter buttons sit on it.
+    wstring label;Color labelColor=MUTED;
+    if(g.hoverHour>=0){
+        wchar_t b[96];double share=g.view.day>0?100*HourEnergy(g.hoverHour)/g.view.day:0;
+        swprintf(b,96,L"%ls–%ls · %.0f%% of the day",Clock(g.view.hours[g.hoverHour]).c_str(),Clock(g.view.hours[g.hoverHour]+3600).c_str(),share);label=b;labelColor=FG;
+    }else if(g.selected>=0){label=Clock(g.view.hours[g.selected])+L"–"+Clock(g.view.hours[g.selected]+3600)+L" selected";labelColor=accent;}
+    else if(g.appSelected){label=DisplayName(g.appName)+L" · last 24 hours";labelColor=FG;}
+    else label=L"Last 24 hours";
+    TextAt(gr,label,20,U_LABEL_Y,200,0,labelColor);
+    const float x=20,y=U_CHART_Y,w=232,h=U_CHART_H,step=w/24,barW=step-2.5f;
+    double peak=0;for(int i=0;i<24;i++)peak=std::max(peak,HourEnergy(i));
     for(int i=0;i<24;i++){
         float left=x+i*step;
-        if(g.selected==i)Rounded(gr,RectF(left-1,y-3,step,35),3,Tint(GREEN,22));
-        if(peak<=0){Rounded(gr,RectF(left,y+23,step-3,3),1.5f,LINE);continue;}
-        float yy=y+h;
+        if(g.selected==i)Rounded(gr,RectF(left-1.25f,y-4,step,h+6),3,Tint(accent,30));
+        else if(g.hoverHour==i)Rounded(gr,RectF(left-1.25f,y-4,step,h+6),3,Tint(FG,14));
+        if(peak<=0){Rounded(gr,RectF(left,y+h-3,barW,3),1.5f,LINE);continue;}
+        bool dim=(g.selected>=0&&g.selected!=i)||g.appSelected;
         const double values[]={g.view.battery[i],g.view.plugged[i],g.view.unknown[i]};
-        const Color colors[]={GREEN,GOLD,BLUE};
-        for(int k=0;k<3;k++){float bh=float(values[k]/peak*h);if(bh>0){yy-=bh;SolidBrush b(Tint(colors[k],g.selected>=0&&g.selected!=i?65:200));gr.FillRectangle(&b,left,yy,step-3,std::max(1.f,bh));}}
+        const Color colors[]={GREEN,BLUE,MUTED}; // Same meaning as the battery history: plugged is blue.
+        float yy=y+h;
+        for(int k=0;k<3;k++){
+            if(values[k]<=0)continue;float bh=std::max(1.5f,float(values[k]/peak*h));yy-=bh;
+            SolidBrush b(Tint(colors[k],dim?60:215));gr.FillRectangle(&b,left,yy,barW,bh);
+        }
+        if(g.appSelected&&g.view.app[i]>0){float ah=std::max(2.f,float(g.view.app[i]/peak*h));Rounded(gr,RectF(left,y+h-ah,barW,ah),1.2f,FG);}
     }
-    TextAt(gr,Clock(g.view.hours[0]),x,y+h+6,60,0,MUTED);
-    TextAt(gr,L"now",x+w-45,y+h+6,45,0,MUTED,true);
-    TextAt(gr,L"Share of reported app energy",20,154,232,0,MUTED);
+    Stroke(gr,x,y+h+0.5f,x+w,y+h+0.5f,LINE);
+    TextAt(gr,Clock(g.view.hours[0]),x,y+h+5,60,0,MUTED);
+    TextCenter(gr,Clock(g.view.hours[12]),x+w/2-30,y+h+5,60,0,MUTED);
+    TextAt(gr,L"now",x+w-45,y+h+5,45,0,MUTED,true);
     if(g.view.apps.empty()){
-        wstring message=g.energyHeader.updated?L"No app estimates for this selection":L"Load Windows app history";
-        TextAt(gr,message,20,181,232,2,FG);
-        TextAt(gr,g.refreshing?L"Windows is preparing the export…":!g.notice.empty()?g.notice:L"Refresh ↻ loads Windows' saved data.",20,204,232,0,MUTED);
-        if(!g.energyHeader.updated)TextAt(gr,L"Refresh on demand · no process scanning",20,225,232,0,MUTED);
+        wstring message=g.energyHeader.updated?L"No app energy for this selection":L"Load Windows app history";
+        TextAt(gr,message,20,U_LIST_Y+8,232,2,FG);
+        TextAt(gr,g.refreshing?L"Windows is preparing the export…":!g.notice.empty()?g.notice:L"Refresh ↻ loads Windows' saved estimates.",20,U_LIST_Y+30,232,0,MUTED);
+        if(!g.energyHeader.updated)TextAt(gr,L"On demand · Cell never scans running processes",20,U_LIST_Y+50,232,0,MUTED);
     }else{
-        for(int row=0;row<3;row++){
-            size_t idx=size_t(g.page*3+row);if(idx>=g.view.apps.size())break;
-            auto&a=g.view.apps[idx];float yy=173+row*25.f;
-            Color accent=g.filter==1?GOLD:GREEN;
-            Rounded(gr,RectF(20,yy,19,19),5,Tint(accent,20));
-            wstring letter=a.name.empty()?L"·":wstring(1,wchar_t(towupper(a.name[0])));
-            TextAt(gr,letter,25,yy+2,13,0,accent);
-            TextAt(gr,a.name,47,yy+1,159,1,FG);
-            wchar_t b[24];double share=g.view.total>0?100*a.mj/g.view.total:0;swprintf(b,24,L"%.0f%%",share);
-            TextAt(gr,b,207,yy+1,45,1,accent,true);
-            Stroke(gr,47,yy+19,252,yy+19,LINE,1);
-            Stroke(gr,47,yy+19,47+float(205*share/100),yy+19,accent,1.5f);
+        for(int row=0;row<APP_ROWS;row++){
+            size_t idx=size_t(g.page*APP_ROWS+row);if(idx>=g.view.apps.size())break;
+            auto& a=g.view.apps[idx];float ry=U_LIST_Y+row*U_ROW_H;
+            bool chosen=g.appSelected&&a.id==g.appId;
+            if(chosen)Rounded(gr,RectF(14,ry-3,244,U_ROW_H-1),6,Tint(accent,28));
+            else if(g.hoverRow==row)Rounded(gr,RectF(14,ry-3,244,U_ROW_H-1),6,Tint(FG,12));
+            wstring name=DisplayName(a.name);
+            if(Bitmap* icon=AppIcon(a.id)){
+                auto mode=gr.GetInterpolationMode();gr.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+                gr.DrawImage(icon,RectF(20,ry,18,18));gr.SetInterpolationMode(mode);
+            }else{
+                Color c=AvatarColor(a.id);Rounded(gr,RectF(20,ry,18,18),5,Tint(c,40));
+                TextCenter(gr,name.empty()?L"·":wstring(1,wchar_t(towupper(name[0]))),20,ry+2,18,0,c);
+            }
+            TextAt(gr,name,46,ry+1,150,1,FG);
+            wchar_t b[24];double share=g.view.total>0?100*a.mj/g.view.total:0;swprintf(b,24,share<1?L"<1%%":L"%.0f%%",share);
+            TextAt(gr,b,196,ry+1,56,1,chosen?FG:accent,true);
+            Rounded(gr,RectF(46,ry+17,206,3),1.5f,LINE);
+            Rounded(gr,RectF(46,ry+17,std::max(3.f,float(206*share/100)),3),1.5f,accent);
         }
     }
-    wstring freshness;
-    if(g.refreshing)freshness=L"Refreshing Windows history…";
-    else if(!g.notice.empty())freshness=L"Refresh issue · see menu";
-    else if(g.energyHeader.updated&&g.view.unassigned>0){
-        wchar_t b[100];double share=100*g.view.unassigned/(g.view.total+g.view.unassigned);
-        swprintf(b,100,L"Unassigned %.0f%% · cache %ls",share,Clock(g.energyHeader.updated).c_str());freshness=b;
-    }else if(g.energyHeader.updated){
-        auto age=now>=g.energyHeader.updated?(now-g.energyHeader.updated)/60:0;
-        if(age<1)freshness=L"Cache updated just now";
-        else if(age<60)freshness=L"Cache updated "+std::to_wstring(age)+L"m ago";
-        else freshness=L"Cache updated "+std::to_wstring(age/60)+L"h ago";
-    }else freshness=L"Windows estimates · refresh on demand";
-    TextAt(gr,freshness,20,252,175,0,MUTED);gr.Restore(state);
+    wstring foot;
+    if(g.view.unassigned>0&&g.view.total+g.view.unassigned>0){
+        wchar_t b[80];swprintf(b,80,L"%.0f%% not assigned to an app",100*g.view.unassigned/(g.view.total+g.view.unassigned));foot=b;
+    }else if(!g.view.apps.empty())foot=std::to_wstring(g.view.apps.size())+(g.view.apps.size()==1?L" app":L" apps");
+    TextAt(gr,foot,20,U_FOOT_Y+5,140,0,MUTED);
+    if(g.view.Pages()>1)TextAt(gr,std::to_wstring(g.page+1)+L" / "+std::to_wstring(g.view.Pages()),148,U_FOOT_Y+5,48,0,MUTED,true);
+    gr.Restore(state);
 }
 void Paint(Graphics& gr,int width,int height,uint64_t now,const RECT* dirty=nullptr){
     gr.SetSmoothingMode(SmoothingModeAntiAlias);gr.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     auto touches=[&](float x,float y,float w,float h){return !dirty||(dirty->right>Px(x)&&dirty->left<Px(x+w)&&dirty->bottom>Px(y)&&dirty->top<Px(y+h));};
     SolidBrush background(BG);gr.FillRectangle(&background,0,0,width,height);gr.ScaleTransform(g.scale,g.scale);
     if(touches(0,0,272,42)){
-        SolidBrush green(GREEN);gr.FillEllipse(&green,20.f,23.f,6.f,6.f);TextAt(gr,L"cell",33,16,160,3,FG);
+        SolidBrush dot(StateColor());gr.FillEllipse(&dot,20.f,23.f,6.f,6.f);TextAt(gr,L"cell",33,16,160,3,FG);
     }
     if(touches(0,42,272,70)){
-        TextAt(gr,g.power.percent<0?L"—":std::to_wstring(g.power.percent),17,43,180,5,FG);
-        RectF percentBounds;wstring percentage=g.power.percent<0?L"—":std::to_wstring(g.power.percent);
+        wstring percentage=g.power.percent<0?L"—":std::to_wstring(g.power.percent);
+        TextAt(gr,percentage,17,43,180,5,IsLow()?RED:FG);
+        RectF percentBounds;
         gr.MeasureString(percentage.c_str(),int(percentage.size()),g.fonts[5].get(),PointF(0,0),StringFormat::GenericTypographic(),&percentBounds);
         TextAt(gr,L"%",21+percentBounds.Width,80,36,4,MUTED);
         const float bx=214,by=78;Rounded(gr,RectF(bx,by,33,17),4,LINE);Rounded(gr,RectF(bx+33,by+5,3,7),1.5f,LINE);
-        if(g.power.percent>=0)Rounded(gr,RectF(bx+3,by+3,std::max(1.f,27.f*g.power.percent/100),11),2,SourceColor(g.power.source));
+        if(g.power.percent>=0)Rounded(gr,RectF(bx+3,by+3,std::max(1.f,27.f*g.power.percent/100),11),2,StateColor());
         if(g.power.source==Charging){PointF bolt[]={{229,77},{224,86},{229,86},{226,95},{235,83},{230,83}};SolidBrush brush(BG);gr.FillPolygon(&brush,bolt,6);}
     }
-    if(touches(20,118,172,23))TextAt(gr,StatusText(),20,121,172,1,SourceColor(g.power.source));
-    if(touches(196,118,59,23)&&g.power.watts>0){wchar_t b[30];swprintf(b,30,L"%.2f W",g.power.watts);TextAt(gr,b,197,121,55,1,MUTED,true);}
+    if(touches(20,118,172,23))TextAt(gr,StatusText(),20,121,172,1,StateColor());
+    if(touches(196,118,59,23)&&g.power.watts>0){
+        // Sign shows direction: energy into (+) or out of (−) the battery.
+        wchar_t b[30];const wchar_t* sign=g.power.source==Charging?L"+":g.power.source==Battery?L"−":L"";
+        swprintf(b,30,L"%ls%.2f W",sign,g.power.watts);TextAt(gr,b,197,121,55,1,MUTED,true);
+    }
     if(touches(18,146,239,30))TextAt(gr,MainEta(),20,149,235,4,FG);
     if(touches(18,177,241,18))TextAt(gr,EtaLabel(),20,179,238,0,MUTED);
-    if(touches(18,200,237,38))PaintHistory(gr,now);
-    if(touches(0,240,272,32)){
-        TextAt(gr,L"24h",20,248,26,0,MUTED);
-        SolidBrush b(GREEN);gr.FillEllipse(&b,52.f,253.f,4.f,4.f);TextAt(gr,L"Battery",61,248,47,0,MUTED);
-        SolidBrush c(GOLD);gr.FillEllipse(&c,115.f,253.f,4.f,4.f);TextAt(gr,L"Charging",124,248,57,0,MUTED);
-    }
-    if(g.expanded&&touches(0,HEIGHT,CW,HEIGHT))PaintUsage(gr,now);
+    if(touches(18,TILE_Y-2,236,TILE_H+4))PaintTiles(gr);
+    if(touches(16,CHART_Y-4,240,CHART_H+8))PaintHistory(gr,now);
+    if(touches(0,LEGEND_Y-4,228,22))PaintLegend(gr,now);
+    if(g.expanded&&touches(0,HEIGHT,CW,DETAIL_HEIGHT))PaintUsage(gr,now);
 }
 wstring ButtonCaption(int id){
     switch(id){case Expand:return g.expanded?L"Collapse app usage":L"Expand app usage";case Menu:return L"Menu";case Refresh:return g.hourlyAvailable?L"Refresh Windows app history":L"Refresh Windows app history (administrator consent)";
-    case FilterBattery:return L"On battery";case FilterPlugged:return L"Plugged in";case FilterAll:return L"All";case ClearHour:return L"Clear selected hour";
+    case FilterBattery:return L"On battery";case FilterPlugged:return L"Plugged in";case FilterAll:return L"All";case ClearHour:return L"Clear selection";
     case PreviousPage:return L"Previous apps";case NextPage:return L"Next apps";case DesktopPin:return g.desktopWanted?L"Unpin from desktop":L"Pin to desktop (behind app windows)";}return L"";
 }
 bool IsSelected(int id){return (id==DesktopPin&&g.desktop)||(id==FilterBattery&&g.filter==0)||(id==FilterPlugged&&g.filter==1)||(id==FilterAll&&g.filter==2);}
 void DrawButton(Graphics& gr,int id,float w,float h,bool pressed=false,bool focus=false){
     gr.SetSmoothingMode(SmoothingModeAntiAlias);gr.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    Color parent=id==Expand||id==Menu||id==DesktopPin?BG:PANEL;
+    bool filter=id==FilterBattery||id==FilterPlugged||id==FilterAll;
+    Color parent=id==Expand||id==Menu||id==DesktopPin?BG:filter?TRACK:PANEL;
     SolidBrush parentBrush(parent);gr.FillRectangle(&parentBrush,0.f,0.f,w,h);Color fg=MUTED;
     bool selected=IsSelected(id);
     if(id==Expand){Rounded(gr,RectF(0,0,w,h),7,TRACK);fg=GREEN;}
-    if(selected){Rounded(gr,RectF(0,0,w,h),6,Tint(id==FilterPlugged?GOLD:GREEN,20));fg=id==FilterPlugged?GOLD:GREEN;}
+    if(selected&&filter){Rounded(gr,RectF(0,0,w,h),6,Color(255,57,72,67));fg=id==FilterPlugged?BLUE:id==FilterAll?FG:GREEN;}
+    else if(selected){Rounded(gr,RectF(0,0,w,h),6,Tint(GREEN,20));fg=GREEN;}
     if(pressed)Rounded(gr,RectF(0,0,w,h),6,Tint(FG,24));
+    if(filter){TextCenter(gr,ButtonCaption(id),0,(h-14)/2,w,1,fg);if(focus){Pen p(Tint(GREEN,170),1);p.SetDashStyle(DashStyleDot);gr.DrawRectangle(&p,2.f,2.f,w-5,h-5);}return;}
     switch(id){
     case Expand:VerticalChevron(gr,w/2,h/2,g.expanded,fg);break;
     case DesktopPin:PinIcon(gr,w/2,h/2,fg);break;
@@ -713,16 +981,16 @@ void DrawButton(Graphics& gr,int id,float w,float h,bool pressed=false,bool focu
 }
 struct ControlPosition { int id,x,y,w,h;bool details; };
 const ControlPosition controls[]={
-    {DesktopPin,200,12,28,28,false},{Menu,232,12,28,28,false},{Expand,230,240,30,26,false},{Refresh,224,HEIGHT+12,28,28,true},
-    {FilterBattery,20,HEIGHT+44,88,25,true},{FilterPlugged,114,HEIGHT+44,88,25,true},{FilterAll,208,HEIGHT+44,44,25,true},
-    {ClearHour,224,HEIGHT+73,28,22,true},{PreviousPage,202,HEIGHT+245,24,23,true},{NextPage,232,HEIGHT+245,24,23,true}
+    {DesktopPin,200,12,28,28,false},{Menu,232,12,28,28,false},{Expand,230,int(LEGEND_Y)-6,30,26,false},{Refresh,224,HEIGHT+10,28,28,true},
+    {FilterBattery,22,HEIGHT+56,76,22,true},{FilterPlugged,98,HEIGHT+56,76,22,true},{FilterAll,174,HEIGHT+56,76,22,true},
+    {ClearHour,230,HEIGHT+86,22,20,true},{PreviousPage,200,HEIGHT+318,24,22,true},{NextPage,228,HEIGHT+318,24,22,true}
 };
 void LayoutButtons(){
     for(auto& c:controls){HWND b=GetDlgItem(g.window,c.id);if(!b)continue;
         MoveWindow(b,Px(c.x),Px(c.y),Px(c.w),Px(c.h),TRUE);
         bool visible=!c.details||g.expanded;
-        if(c.id==ClearHour&&g.selected<0)visible=false;
-        if(c.id==PreviousPage||c.id==NextPage){if(g.view.apps.size()<=3)visible=false;EnableWindow(b,c.id==PreviousPage?g.page>0:(g.page+1)*3<int(g.view.apps.size()));}
+        if(c.id==ClearHour&&g.selected<0&&!g.appSelected)visible=false;
+        if(c.id==PreviousPage||c.id==NextPage){if(g.view.Pages()<=1)visible=false;EnableWindow(b,c.id==PreviousPage?g.page>0:g.page+1<g.view.Pages());}
         if(c.id==Refresh)EnableWindow(b,!g.refreshing);
         if(c.id==Refresh)SetWindowTextW(b,ButtonCaption(c.id).c_str());
         if(c.id==Expand)SetWindowTextW(b,ButtonCaption(c.id).c_str());
@@ -731,9 +999,51 @@ void LayoutButtons(){
     }
 }
 void Redraw(){if(g.window&&!g.hidden&&g.displayOn&&!g.locked&&!g.suspended){InvalidateRect(g.window,nullptr,FALSE);for(HWND b:g.buttons)InvalidateRect(b,nullptr,FALSE);}}
+bool LightTaskbar(){
+    DWORD value=0,size=sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",L"SystemUsesLightTheme",RRF_RT_REG_DWORD,nullptr,&value,&size)==ERROR_SUCCESS&&value!=0;
+}
+// Tray glyph: the percentage as outlined digits over a thin level bar.
+std::unique_ptr<Bitmap> MakeTrayBitmap(int size,int percent,uint8_t source,bool low,bool light){
+    auto image=std::make_unique<Bitmap>(size,size,PixelFormat32bppARGB);Graphics gr(image.get());
+    gr.SetSmoothingMode(SmoothingModeAntiAlias);gr.Clear(Color(0,0,0,0));
+    float s=float(size),bar=std::max(2.f,std::round(s/7));
+    Color ink=light?Color(255,24,28,29):Color(255,246,249,246);
+    Color accent=low?RED:SourceColor(source);
+    if(light)accent=Color(255,BYTE(accent.GetR()*0.62),BYTE(accent.GetG()*0.62),BYTE(accent.GetB()*0.62));
+    Rounded(gr,RectF(0.5f,s-bar,s-1,bar),bar/2,Tint(ink,70));
+    if(percent>0)Rounded(gr,RectF(0.5f,s-bar,std::max(bar,(s-1)*std::min(percent,100)/100.f),bar),bar/2,accent);
+    wstring text=percent<0?L"?":std::to_wstring(std::min(percent,100));
+    FontFamily family(L"Segoe UI");GraphicsPath path;StringFormat fmt(StringFormat::GenericTypographic());
+    float em=text.size()>=3?s*0.6f:s*0.86f;
+    path.AddString(text.c_str(),int(text.size()),&family,FontStyleBold,em,PointF(0,0),&fmt);
+    RectF bounds;path.GetBounds(&bounds);
+    float room=s-bar-1;
+    if(bounds.Width>0&&bounds.Height>0){
+        float fit=std::min(1.f,std::min((s-0.5f)/bounds.Width,room/bounds.Height));
+        Matrix m;m.Translate((s-bounds.Width*fit)/2,(room-bounds.Height*fit)/2);m.Scale(fit,fit);m.Translate(-bounds.X,-bounds.Y);
+        path.Transform(&m);
+    }
+    SolidBrush brush(low?accent:ink);gr.FillPath(&brush,&path);
+    return image;
+}
+void UpdateTrayIcon(){
+    if(!g.tray.hWnd)return;
+    int size=std::clamp(GetSystemMetricsForDpi(SM_CXSMICON,GetDpiForWindow(g.window)),16,64);
+    uint32_t key=uint32_t(g.power.percent+1)|(uint32_t(g.power.source)<<8)|(uint32_t(IsLow())<<12)|(uint32_t(g.lightTaskbar)<<13)|(uint32_t(size)<<16);
+    if(key==g.trayKey&&g.trayIcon)return;
+    HICON icon=nullptr;MakeTrayBitmap(size,g.power.percent,g.power.source,IsLow(),g.lightTaskbar)->GetHICON(&icon);
+    if(!icon)return;
+    g.tray.hIcon=icon;g.tray.uFlags=NIF_ICON;
+    if(Shell_NotifyIconW(NIM_MODIFY,&g.tray)){if(g.trayIcon)DestroyIcon(g.trayIcon);g.trayIcon=icon;g.trayKey=key;}
+    else{DestroyIcon(icon);g.tray.hIcon=g.trayIcon?g.trayIcon:g.icon;}
+}
 void UpdateTray(){
-    if(!g.tray.hWnd)return;wstring s=L"Cell · "+(g.power.percent>=0?std::to_wstring(g.power.percent)+L"% · ":L"")+StatusText();
-    if(g.power.source==Battery)s+=L" · "+MainEta();if(s==g.tray.szTip)return;wcsncpy(g.tray.szTip,s.c_str(),127);g.tray.szTip[127]=0;g.tray.uFlags=NIF_TIP;Shell_NotifyIconW(NIM_MODIFY,&g.tray);
+    if(!g.tray.hWnd)return;
+    UpdateTrayIcon();
+    wstring s=L"Cell · "+(g.power.percent>=0?std::to_wstring(g.power.percent)+L"% · ":L"")+StatusText();
+    if(g.power.source==Battery||(g.power.source==Charging&&g.power.fullSeconds!=UINT32_MAX))s+=L" · "+MainEta();
+    if(s==g.tray.szTip)return;wcsncpy(g.tray.szTip,s.c_str(),127);g.tray.szTip[127]=0;g.tray.uFlags=NIF_TIP|NIF_SHOWTIP;Shell_NotifyIconW(NIM_MODIFY,&g.tray);
     wstring title=L"Cell · "+StatusText()+L" · "+MainEta();SetWindowTextW(g.window,title.c_str());
 }
 void SamplePower(bool force=false){
@@ -744,14 +1054,20 @@ void SamplePower(bool force=false){
     if(hourChanged)g.selected=-1;
     if(hourChanged||cacheChanged){BuildView(now);LayoutButtons();}
     auto& p=g.power;
-    bool structural=force||hourChanged||cacheChanged||previous.percent!=p.percent||previous.source!=p.source||previous.saver!=p.saver||previous.valid!=p.valid||previous.present!=p.present||previous.windowsEta!=p.windowsEta||previous.recentDrain!=p.recentDrain;
+    bool factsChanged=false;
+    if(force||previous.source!=p.source||!g.facts.readAt||now<g.facts.readAt||now-g.facts.readAt>=3600){
+        BatteryFacts facts=ReadBatteryFacts();facts.readAt=now;
+        factsChanged=facts.valid!=g.facts.valid||facts.designMWh!=g.facts.designMWh||facts.fullMWh!=g.facts.fullMWh||facts.cycles!=g.facts.cycles;g.facts=facts;
+    }
+    bool structural=force||hourChanged||cacheChanged||factsChanged||previous.percent!=p.percent||previous.source!=p.source||previous.saver!=p.saver||previous.valid!=p.valid||previous.present!=p.present||previous.windowsEta!=p.windowsEta||previous.recentDrain!=p.recentDrain||previous.drainCapable!=p.drainCapable||(previous.fullSeconds==UINT32_MAX)!=(p.fullSeconds==UINT32_MAX);
     UpdateTray();
     if(structural){Redraw();return;}
     if(g.hidden||!g.displayOn||g.locked||g.suspended)return;
-    auto invalidate=[](int x,int y,int width,int height){RECT rect{Px(float(x)),Px(float(y)),Px(float(x+width)),Px(float(y+height))};InvalidateRect(g.window,&rect,FALSE);};
+    auto invalidate=[](float x,float y,float width,float height){RECT rect{Px(x),Px(y),Px(x+width),Px(y+height)};InvalidateRect(g.window,&rect,FALSE);};
     if(std::lround(previous.watts*100)!=std::lround(p.watts*100))invalidate(196,118,59,23);
-    if(EtaDisplayMinute(previous.seconds)!=EtaDisplayMinute(p.seconds))invalidate(18,146,239,30);
-    if(!g.history.empty()&&lastHistory!=g.history.back().utc)invalidate(18,200,237,38);
+    if(EtaDisplayMinute(previous.seconds)!=EtaDisplayMinute(p.seconds)||EtaDisplayMinute(previous.fullSeconds)!=EtaDisplayMinute(p.fullSeconds))invalidate(18,146,239,30);
+    if(previous.remainingMWh/100!=p.remainingMWh/100||previous.capacityMWh/100!=p.capacityMWh/100||previous.fullMWh/100!=p.fullMWh/100)invalidate(18,TILE_Y-2,236,TILE_H+4);
+    if(!g.history.empty()&&lastHistory!=g.history.back().utc){invalidate(16,CHART_Y-4,240,CHART_H+8);if(g.hovering)invalidate(0,LEGEND_Y-4,228,22);}
     if(g.expanded&&now/60!=previousSample/60)invalidate(18,HEIGHT+249,180,22);
 }
 UINT DesiredRefreshInterval(){return !g.displayOn||g.locked||g.suspended?0:g.hidden?HIDDEN_INTERVAL_MS:LIVE_INTERVAL_MS;}
@@ -848,7 +1164,7 @@ void StartRefresh(){
         wstring exe=wstring(system)+L"\\schtasks.exe",command=L"\""+exe+L"\" /Run /TN \"\\"+g.scheduledTask+L"\"";
         STARTUPINFOW si{};si.cb=sizeof(si);si.dwFlags=STARTF_USESHOWWINDOW;si.wShowWindow=SW_HIDE;PROCESS_INFORMATION process{};
         if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,system,&si,&process)){g.notice=L"Windows could not start the hourly refresh job.";Redraw();return;}
-        CloseHandle(process.hThread);auto* wait=new RefreshWait{process.hProcess,g.window,true};HANDLE thread=CreateThread(nullptr,0,AwaitRefresh,wait,0,nullptr);
+        CloseHandle(process.hThread);auto* wait=new RefreshWait{process.hProcess,g.controller?g.controller:g.window,true};HANDLE thread=CreateThread(nullptr,0,AwaitRefresh,wait,0,nullptr);
         if(!thread){CloseHandle(process.hProcess);delete wait;}else CloseHandle(thread);
         g.scheduledPending=true;g.scheduledRequest=GetTickCount64();g.refreshing=true;g.notice.clear();LayoutButtons();Redraw();return;
     }
@@ -856,7 +1172,7 @@ void StartRefresh(){
     wstring exe=ExePath();SHELLEXECUTEINFOW se{};se.cbSize=sizeof(se);se.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_FLAG_NO_UI;
     se.hwnd=g.window;se.lpVerb=L"runas";se.lpFile=exe.c_str();se.lpParameters=L"--refresh";se.lpDirectory=root.c_str();se.nShow=SW_HIDE;
     if(!ShellExecuteExW(&se)){g.notice=GetLastError()==ERROR_CANCELLED?L"Refresh cancelled; existing cache kept.":L"Windows could not start the history export.";Redraw();return;}
-    auto* wait=new RefreshWait{se.hProcess,g.window};HANDLE thread=CreateThread(nullptr,0,AwaitRefresh,wait,0,nullptr);
+    auto* wait=new RefreshWait{se.hProcess,g.controller?g.controller:g.window};HANDLE thread=CreateThread(nullptr,0,AwaitRefresh,wait,0,nullptr);
     if(!thread){CloseHandle(se.hProcess);delete wait;g.notice=L"Export started; reopen Cell to load its cache.";}else{CloseHandle(thread);g.refreshing=true;g.notice.clear();}
     LayoutButtons();Redraw();
 }
@@ -882,9 +1198,9 @@ void Act(int id){
     case Menu:{RECT r;GetWindowRect(GetDlgItem(g.window,Menu),&r);Popup(POINT{r.right,r.bottom});break;}
     case Refresh:StartRefresh();break;
     case FilterBattery:case FilterPlugged:case FilterAll:g.filter=id==FilterBattery?0:id==FilterPlugged?1:2;g.page=0;BuildView(Now());LayoutButtons();Redraw();break;
-    case ClearHour:g.selected=-1;g.page=0;BuildView(Now());LayoutButtons();Redraw();break;
+    case ClearHour:g.selected=-1;g.appSelected=false;g.page=0;BuildView(Now());LayoutButtons();Redraw();break;
     case PreviousPage:if(g.page>0)--g.page;LayoutButtons();Redraw();break;
-    case NextPage:if((g.page+1)*3<int(g.view.apps.size()))++g.page;LayoutButtons();Redraw();break;
+    case NextPage:if(g.page+1<g.view.Pages())++g.page;LayoutButtons();Redraw();break;
     case Show:ShowWidget();break;
     case Topmost:if(!g.desktopWanted){g.top=!g.top;ResizeWidget();SavePrefs();}break;
     case DesktopPin:{
@@ -905,6 +1221,14 @@ void Act(int id){
         if(g.power.recentDrain){swprintf(b,160,L"Recent capacity-loss average: %.2f W over %u seconds\n",g.power.watts,g.power.drainSpan);text+=b;}
         else text+=L"Recent drain: collecting observations; allow 1–2 minutes with the widget visible.\n";
         if(g.power.capacityMWh!=UINT32_MAX){swprintf(b,160,L"Battery-reported remaining energy: %.2f Wh\n",g.power.capacityMWh/1000.0);text+=b;}
+        else if(g.power.remainingMWh!=UINT32_MAX){swprintf(b,160,L"Remaining energy: %.2f Wh\n",g.power.remainingMWh/1000.0);text+=b;}
+        if(g.power.source==Charging&&g.power.fullSeconds!=UINT32_MAX)text+=L"Time to full at the current rate: "+EtaText(g.power.fullSeconds)+L"\n";
+        g.facts=ReadBatteryFacts();g.facts.readAt=Now();
+        if(g.facts.valid){
+            swprintf(b,160,L"\nDesign capacity: %.2f Wh\nFull-charge capacity: %.2f Wh\n",g.facts.designMWh/1000.0,g.facts.fullMWh/1000.0);text+=b;
+            swprintf(b,160,L"Health (full-charge ÷ design): %d%%\n",g.facts.HealthPercent());text+=b;
+            text+=g.facts.cycles?L"Charge cycles: "+std::to_wstring(g.facts.cycles)+L"\n":L"Charge cycles: not reported by this battery\n";
+        }else text+=L"\nDesign capacity and cycle count are not reported by this battery.\n";
         text+=L"\nReadings refresh about every 2 seconds. The battery gauge updates in steps, so recent drain is an average and can take 1–2 minutes to reflect a workload change. Windows' reported rate can lag or disagree with that trend.\n\nTime left prefers Windows' ETA when available, otherwise recent drain, then the reported rate while collecting observations. All are estimates. App history refreshes separately, on demand.";
         MessageBoxW(g.window,text.c_str(),L"Cell · battery readings",MB_OK|MB_ICONINFORMATION);break;
     }
@@ -938,7 +1262,7 @@ bool SaveIcon(const wstring&path){
     IconHeader header;header.size=uint32_t(png.size());return AtomicWrite(path,&header,sizeof(header),png.data(),DWORD(png.size()));
 }
 void AddTray(){
-    g.tray={};g.tray.cbSize=sizeof(g.tray);g.tray.hWnd=g.window;g.tray.uID=1;
+    g.tray={};g.tray.cbSize=sizeof(g.tray);g.tray.hWnd=g.window;g.tray.uID=1;g.trayKey=UINT32_MAX;g.lightTaskbar=LightTaskbar();
     g.tray.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;g.tray.uCallbackMessage=WM_TRAY;g.tray.hIcon=g.icon;
     wcscpy(g.tray.szTip,L"Cell battery");Shell_NotifyIconW(NIM_ADD,&g.tray);g.tray.uVersion=NOTIFYICON_VERSION_4;Shell_NotifyIconW(NIM_SETVERSION,&g.tray);UpdateTray();
 }
@@ -974,6 +1298,9 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         if(!g.desktopWanted||ApplyDesktopPin()||++g.desktopRetries>=6)KillTimer(hwnd,DESKTOP_RETRY_TIMER);
         LayoutButtons();return 0;
     }
+    // Refresh results arrive here because the widget window can be recreated mid-refresh.
+    if(msg==WM_IMPORTED){if(IsWindow(g.window))SendMessageW(g.window,msg,wp,lp);return 0;}
+    if(msg==WM_SETTINGCHANGE&&IsWindow(g.window))SendMessageW(g.window,msg,wp,lp);
     if(msg==WM_RECREATE&&!g.quitting){
         g.historyGap=true;
         if(!CreateWidget()){g.quitting=true;PostQuitMessage(1);}return 0;
@@ -1017,7 +1344,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
             if(id==Refresh)tip=(g.hourlyAvailable?L"App history refreshes hourly without prompts. Click to request the same scheduled job now. ":L"Refresh saved Windows app estimates. Only the temporary exporter asks for administrator consent. ")+wstring(L"No resident service is installed. Hardware EMI meters are excluded. Unassigned energy stays separate from app shares.")+(g.energyHeader.latest?L" Latest Windows record: "+Clock(g.energyHeader.latest)+L".":L"");
             else if(id==FilterBattery)tip=L"Share of Windows' reported app energy while on battery. It is not the percentage of battery capacity lost.";
             else if(id==FilterPlugged)tip=L"App energy used while plugged in, separate from energy stored in the battery by charging.";
-            else if(id==ClearHour)tip=L"Show all 24 clock hours again. Chart bars use Windows' record timestamps, not exact activity start times.";
+            else if(id==ClearHour)tip=L"Clear the selected hour and app. Tip: click any bar to filter by that hour, or any app to see its hourly energy.";
             else tip=ButtonCaption(id);t->lpszText=const_cast<wchar_t*>(tip.c_str());return 0;
         }break;
     }
@@ -1026,17 +1353,63 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         if(g.desktop&&GET_Y_LPARAM(lp)<Px(40)&&GET_X_LPARAM(lp)<Px(196)){
             g.dragging=true;GetCursorPos(&g.dragStart);GetWindowRect(hwnd,&g.dragRect);SetCapture(hwnd);
         }return 0;
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE:{
         if(g.dragging){
             POINT cursor{};GetCursorPos(&cursor);POINT position{g.dragRect.left+cursor.x-g.dragStart.x,g.dragRect.top+cursor.y-g.dragStart.y};
             MapWindowPoints(nullptr,g.desktopHost,&position,1);
             SetWindowPos(hwnd,nullptr,position.x,position.y,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-        }return 0;
+            return 0;
+        }
+        // Hovering the 24h chart reads out the nearest recorded sample in the legend row.
+        float x=GET_X_LPARAM(lp)/g.scale,y=GET_Y_LPARAM(lp)/g.scale;
+        bool over=x>=CHART_X-2&&x<=CHART_X+CHART_W+2&&y>=CHART_Y-6&&y<=CHART_Y+CHART_H+4;
+        float hx=std::clamp(x,CHART_X,CHART_X+CHART_W);
+        if(over!=g.hovering||(over&&std::abs(hx-g.hoverX)>=0.5f)){
+            g.hovering=over;g.hoverX=hx;
+            RECT rect{0,Px(CHART_Y-6),Px(228),Px(LEGEND_Y+18)};InvalidateRect(hwnd,&rect,FALSE);
+        }
+        // Energy panel: hovering an hour previews its share; hovering a row highlights it.
+        int hour=-1,row=-1;
+        if(g.expanded){
+            float py=y-HEIGHT;
+            if(py>=U_CHART_Y-4&&py<=U_CHART_Y+U_CHART_H+2)hour=UsageHourAt(x);
+            if(x>=14&&x<258&&py>=U_LIST_Y-3&&py<U_LIST_Y+APP_ROWS*U_ROW_H-3){
+                row=int((py-U_LIST_Y+3)/U_ROW_H);if(size_t(g.page*APP_ROWS+row)>=g.view.apps.size())row=-1;
+            }
+        }
+        if(hour!=g.hoverHour){g.hoverHour=hour;RECT rect{0,Px(HEIGHT+U_LABEL_Y-2),Px(CW),Px(HEIGHT+U_CHART_Y+U_CHART_H+4)};InvalidateRect(hwnd,&rect,FALSE);}
+        if(row!=g.hoverRow){g.hoverRow=row;RECT rect{0,Px(HEIGHT+U_LIST_Y-4),Px(CW),Px(HEIGHT+U_LIST_Y+APP_ROWS*U_ROW_H)};InvalidateRect(hwnd,&rect,FALSE);}
+        if((over||hour>=0||row>=0)&&!g.tracking){TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,hwnd,0};g.tracking=TrackMouseEvent(&t)!=0;}
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if(LOWORD(lp)==HTCLIENT&&(g.hoverHour>=0||g.hoverRow>=0)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
+        break;
+    case WM_MOUSELEAVE:
+        g.tracking=false;
+        if(g.hovering){g.hovering=false;RECT rect{0,Px(CHART_Y-6),Px(228),Px(LEGEND_Y+18)};InvalidateRect(hwnd,&rect,FALSE);}
+        if(g.hoverHour>=0||g.hoverRow>=0){g.hoverHour=g.hoverRow=-1;RECT rect{0,Px(float(HEIGHT)),Px(CW),Px(float(EXPANDED_HEIGHT))};InvalidateRect(hwnd,&rect,FALSE);}
+        return 0;
+    case WM_SETTINGCHANGE:
+        if(lp&&wcscmp(reinterpret_cast<const wchar_t*>(lp),L"ImmersiveColorSet")==0){bool light=LightTaskbar();if(light!=g.lightTaskbar){g.lightTaskbar=light;UpdateTray();}}
+        break;
     case WM_CAPTURECHANGED:g.dragging=false;return 0;
     case WM_LBUTTONUP:{
         if(g.dragging){g.dragging=false;ReleaseCapture();ResizeWidget();SavePrefs();return 0;}
         float x=GET_X_LPARAM(lp)/g.scale,y=GET_Y_LPARAM(lp)/g.scale;
-        if(g.expanded&&x>=20&&x<252&&y>=HEIGHT+97&&y<=HEIGHT+142){g.selected=std::clamp(int((x-20)/(232.f/24)),0,23);g.page=0;BuildView(Now());LayoutButtons();Redraw();}return 0;
+        float py=y-HEIGHT;
+        if(g.expanded&&py>=U_CHART_Y-4&&py<=U_CHART_Y+U_CHART_H+2&&UsageHourAt(x)>=0){
+            int hour=UsageHourAt(x);g.selected=g.selected==hour?-1:hour; // Clicking the selected hour clears it.
+            g.page=0;BuildView(Now());LayoutButtons();Redraw();
+        }else if(g.expanded&&x>=14&&x<258&&py>=U_LIST_Y-3&&py<U_LIST_Y+APP_ROWS*U_ROW_H-3){
+            // Clicking an app overlays its hourly energy on the chart; clicking it again clears it.
+            size_t idx=size_t(g.page*APP_ROWS+int((py-U_LIST_Y+3)/U_ROW_H));
+            if(idx<g.view.apps.size()){
+                auto& a=g.view.apps[idx];
+                if(g.appSelected&&g.appId==a.id)g.appSelected=false;else{g.appSelected=true;g.appId=a.id;g.appName=a.name;}
+                BuildView(Now());LayoutButtons();Redraw();
+            }
+        }return 0;
     }
     case WM_MOUSEWHEEL:if(g.expanded)Act(GET_WHEEL_DELTA_WPARAM(wp)<0?NextPage:PreviousPage);return 0;
     case WM_CONTEXTMENU:{POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};if(p.x==-1){RECT r;GetWindowRect(hwnd,&r);p={r.left+Px(230),r.top+Px(40)};}Popup(p);return 0;}
@@ -1060,7 +1433,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     case WM_IMPORTED:
         if(lp==1){if(wp!=0){g.scheduledPending=false;g.refreshing=false;g.notice=L"Windows could not run the hourly refresh job. Re-run hourly setup to repair it.";}LayoutButtons();Redraw();return 0;}
         g.refreshing=false;
-        if(wp==0){if(!ReadEnergy(data+L"\\energy.bin",g.energy,g.energyHeader))g.notice=L"Windows export finished, but its cache could not be read.";else{g.notice.clear();g.selected=-1;g.page=0;BuildView(Now());}}
+        if(wp==0){if(!ReadEnergy(data+L"\\energy.bin",g.energy,g.energyHeader))g.notice=L"Windows export finished, but its cache could not be read.";else{ReadAppPaths(data,g.appPaths);g.icons.clear();g.notice.clear();g.selected=-1;g.page=0;BuildView(Now());}}
         else g.notice=ReadStatus();LayoutButtons();Redraw();return 0;
     case WM_TRAY:{
         UINT event=LOWORD(lp);
@@ -1079,6 +1452,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         SaveHistory();SavePrefs();for(auto h:g.notifications)UnregisterPowerSettingNotification(h);g.notifications.clear();
         WTSUnRegisterSessionNotification(hwnd);if(g.timer)KillTimer(hwnd,SAMPLE_TIMER);
         Shell_NotifyIconW(NIM_DELETE,&g.tray);g.tray={};g.timer=false;g.timerInterval=0;
+        if(g.trayIcon){DestroyIcon(g.trayIcon);g.trayIcon=nullptr;}g.trayKey=UINT32_MAX;g.hovering=g.tracking=false;
         g.window=nullptr;g.desktopHost=nullptr;g.desktop=false;g.tooltip=nullptr;g.buttons.clear();g.buffer.reset();
         if(!g.quitting&&g.desktopWanted&&!g.readOnly&&g.controller)PostMessageW(g.controller,WM_RECREATE,0,0);else PostQuitMessage(0);return 0;
     }return DefWindowProcW(hwnd,msg,wp,lp);
@@ -1220,14 +1594,14 @@ int SelfTest(const wstring&folder){
     Sample a{now-300,80,Battery,0},b{now,79,Battery,0};check(CanJoin(a,b),"Connect observed battery samples");b.gap=1;check(!CanJoin(a,b),"Never interpolate across suspension or unobserved gaps");b.gap=0;b.utc=now+1200;check(!CanJoin(a,b),"Long sampling gaps remain blank");
     g.energy.clear();g.filter=0;BuildView(now);g.power=ReadPower();
     if(CreateWidget(false)){
-        RECT r;GetClientRect(g.window,&r);check(r.right==Px(CW)&&r.bottom==Px(HEIGHT),"Native compact client has fixed square dimensions");
+        RECT r;GetClientRect(g.window,&r);check(r.right==Px(CW)&&r.bottom==Px(HEIGHT),"Native compact client has fixed dimensions");
         int originalWidth=r.right;
         g.expanded=true;ResizeWidget();GetClientRect(g.window,&r);check(r.right==originalWidth&&r.bottom==Px(EXPANDED_HEIGHT),"Expansion keeps the compact width and extends downward");
         check(GetDlgItem(g.window,Expand)&&GetDlgItem(g.window,Refresh)&&GetDlgItem(g.window,FilterBattery)&&GetDlgItem(g.window,DesktopPin),"Keyboard-accessible native button controls include desktop pin");
         check(Px(CW)==int(std::lround(CW*GetDpiForWindow(g.window)/96.f*0.8f)),"Compact widget is twenty percent smaller at the current display DPI");
         bool controlsFit=true;
         for(auto& c:controls)if(c.x<0||c.y<0||c.x+c.w>CW||c.y+c.h>EXPANDED_HEIGHT||(c.details&&c.y<HEIGHT))controlsFit=false;
-        check(controlsFit,"Every detail control fits below the compact square");
+        check(controlsFit,"Every detail control fits below the compact panel");
         g.expanded=false;ResizeWidget();
         {
             RECT before{},after{};GetWindowRect(g.window,&before);
@@ -1265,33 +1639,92 @@ int SelfTest(const wstring&folder){
         g.readOnly=true;DestroyWindow(g.window);g.window=nullptr;
         if(g.controller){DestroyWindow(g.controller);g.controller=nullptr;}
     }else check(false,"Create hidden native test window");
+    {
+        Power saved=g.power;g.power=Power{};g.power.valid=g.power.present=true;g.power.source=Charging;g.power.percent=60;g.power.fullSeconds=3900;
+        check(MainEta()==L"Full in 1h 05m","Charging shows a time-to-full estimate");
+        g.power.source=Plugged;g.power.percent=80;check(MainEta()==L"Charging paused","Plugged in below full is reported as paused charging");
+        g.power.source=Battery;g.power.percent=12;check(IsLow()&&StatusText()==L"Low battery","Low battery state is flagged at or below the threshold");
+        g.power=saved;
+        BatteryFacts facts;facts.valid=true;facts.designMWh=50000;facts.fullMWh=46000;check(facts.HealthPercent()==92,"Battery health is full-charge over design capacity");
+        auto glyph=MakeTrayBitmap(16,76,Battery,false,false);check(glyph&&glyph->GetWidth()==16,"Tray glyph renders at small-icon size");
+        auto savedHistory=g.history;g.history.clear();g.history.push_back(Sample{now-DAY/2,55,Battery,1});
+        check(DisplayName(L"Mozilla.Firefox")==L"Firefox"&&DisplayName(L"Microsoft.WindowsTerminal")==L"Windows Terminal"&&DisplayName(L"python3.12")==L"Python3.12"&&DisplayName(L"rustdesk")==L"Rustdesk"&&DisplayName(L"claude")==L"Claude","App names are tidied for display without mangling versions");
+        check(ShellParsingName(L"Mozilla.Firefox_n80bbvh6b1yt2!App")==L"shell:AppsFolder\\Mozilla.Firefox_n80bbvh6b1yt2!App"&&ShellParsingName(L"C:\\Apps\\a.exe")==L"C:\\Apps\\a.exe"&&ShellParsingName(L"Unknown").empty(),"Packaged apps and paths map to shell icon sources");
+        {
+            wchar_t windows[MAX_PATH]{};GetWindowsDirectoryW(windows,MAX_PATH);wchar_t device[512]{};wchar_t drive[3]={windows[0],L':',0};
+            bool mapped=QueryDosDeviceW(drive,device,512)&&_wcsicmp(ShellParsingName(wstring(device)+(windows+2)).c_str(),windows)==0;
+            check(mapped,"SRUM device paths convert to drive-letter paths");
+        }
+        {
+            wstring appsCsv=L"AppId,TimeStamp,OnBattery,TotalEnergyConsumption\nC:\\Apps\\alpha.exe,"+ts+L",1,10\nC:\\Apps\\alpha.exe,"+ts+L",0,5\nUnknown,"+ts+L",1,3\n";
+            std::string bytes=Utf8(appsCsv);wstring csvPath=folder+L"\\apps.csv";WriteBytes(csvPath,bytes.data(),DWORD(bytes.size()));
+            std::vector<Energy> rows;EnergyHeader head;wstring err;std::vector<AppPath> ids;std::map<uint64_t,wstring> loadedPaths;
+            bool ok=ParseEnergy(csvPath,now,rows,head,err,&ids)&&ids.size()==1&&WriteAppPaths(folder,ids)&&ReadAppPaths(folder,loadedPaths);
+            check(ok&&loadedPaths.size()==1&&loadedPaths.begin()->first==Hash(L"C:\\Apps\\alpha.exe")&&loadedPaths.begin()->second==L"C:\\Apps\\alpha.exe","App identities round-trip through apps.bin and exclude unattributed energy");
+        }
+        {
+            auto savedEnergy=g.energy;int savedFilter=g.filter;g.energy.clear();
+            for(int i=0;i<12;i++){Energy e;e.hour=now/3600*3600;e.id=uint64_t(i+1);e.source=Battery;e.mj=100.0+i;wcscpy(e.name,L"App");g.energy.push_back(e);}
+            Energy plugged;plugged.hour=now/3600*3600;plugged.id=1;plugged.source=Plugged;plugged.mj=1000;g.energy.push_back(plugged);
+            g.filter=0;g.selected=-1;g.appSelected=true;g.appId=1;g.page=9;BuildView(now);
+            check(g.view.Pages()==3&&g.page==2,"Five apps per page and the page clamps to the last one");
+            check(std::abs(g.view.battery[23]-1266)<.01&&g.view.plugged[23]==0&&std::abs(g.view.app[23]-100)<.01,"Chart follows the source filter and overlays the selected app");
+            g.appSelected=false;g.page=0;g.energy=savedEnergy;g.filter=savedFilter;BuildView(now);
+        }
+        const Sample* hit=HistoryAt(CHART_X+CHART_W/2,now);
+        check(hit&&hit->percent==55&&!HistoryAt(CHART_X+10,now),"Chart hover finds the nearest sample and ignores unrecorded time");
+        g.history=savedHistory;
+    }
     report+="\r\n"+std::to_string(passed)+" passed, "+std::to_string(failed)+" failed.\r\n";
     WriteBytes(folder+L"\\test-results.txt",report.data(),DWORD(report.size()));return failed?1:0;
 }
 void SeedDemo(){
     uint64_t now=Now(),hour=now/3600*3600;
     g.power={true,true,false,76,Battery,4*3600+38*60,false,9.8};g.history.clear();
-    g.power.reportedWatts=9.8;g.power.recentDrain=true;g.power.drainSpan=120;
+    g.power.reportedWatts=9.8;g.power.recentDrain=true;g.power.drainSpan=120;g.power.remainingMWh=38100;g.power.fullMWh=50100;
+    g.facts.valid=true;g.facts.designMWh=56000;g.facts.fullMWh=50100;g.facts.cycles=214;
     for(int i=0;i<=288;i++){uint64_t utc=now-DAY+i*300;int percent;uint8_t source;
         if(i<96){percent=90-i/3;source=Battery;}else if(i<138){percent=58+(i-96)*36/42;source=Charging;}else{percent=94-(i-138)*18/150;source=Battery;}
         g.history.push_back(Sample{utc,int16_t(percent),source,0});
     }
-    g.energy.clear();const wchar_t* names[]={L"Microsoft Edge",L"Visual Studio Code",L"Spotify",L"System",L"Other apps"};
-    for(int i=0;i<24;i++)for(int app=0;app<5;app++){
-        Energy e;e.hour=hour-(23-i)*3600;e.id=app+1;e.source=(i>=8&&i<=11)?Plugged:Battery;e.mj=(app==0?5:app==1?3:app==2?1.6:app==3?1:0.5)*(30+(i*17+app*9)%70)*3600;wcscpy(e.name,names[app]);g.energy.push_back(e);
+    g.energy.clear();
+    const wchar_t* names[]={L"Microsoft Edge",L"Visual Studio Code",L"Mozilla.Firefox",L"Windows Explorer",L"Spotify",L"Notepad",L"System",L"Other apps"};
+    const double weights[]={5,3,2.4,1.6,1.2,0.6,1,0.5};
+    for(int i=0;i<24;i++)for(int app=0;app<8;app++){
+        if(app==2&&(i<14||i>19))continue; // A burst of activity for the overlay preview.
+        Energy e;e.hour=hour-(23-i)*3600;e.id=app+1;e.source=(i>=8&&i<=11)?Plugged:Battery;e.mj=weights[app]*(30+(i*17+app*9)%70)*3600;wcscpy(e.name,names[app]);g.energy.push_back(e);
     }
-    g.energyHeader.updated=now-20*60;g.energyHeader.latest=hour;g.filter=0;g.selected=-1;BuildView(now);
+    g.appPaths.clear();g.icons.clear();
+    g.appPaths[1]=L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+    g.appPaths[4]=L"C:\\Windows\\explorer.exe";g.appPaths[6]=L"C:\\Windows\\System32\\notepad.exe";
+    g.energyHeader.updated=now-20*60;g.energyHeader.latest=hour;g.filter=0;g.selected=-1;
+    g.appSelected=true;g.appId=3;g.appName=names[2];BuildView(now);
 }
 int Render(const wstring&folder,bool demo){
-    CreateDirectoryW(folder.c_str(),nullptr);g.power=ReadPower();LoadHistory();ReadEnergy(data+L"\\energy.bin",g.energy,g.energyHeader);BuildView(Now());if(demo)SeedDemo();
+    CreateDirectoryW(folder.c_str(),nullptr);g.power=ReadPower();g.facts=ReadBatteryFacts();LoadHistory();ReadEnergy(data+L"\\energy.bin",g.energy,g.energyHeader);BuildView(Now());if(demo)SeedDemo();
     float oldScale=g.scale;g.scale=2;CLSID cls;if(!PngEncoder(cls))return 1;
     for(int expanded=0;expanded<2;expanded++){
         g.expanded=expanded!=0;int width=Px(CW),height=Px(float(WidgetHeight()));Bitmap image(width,height,PixelFormat32bppARGB);Graphics gr(&image);Paint(gr,width,height,Now());gr.ResetTransform();
-        for(auto& c:controls){if(c.details&&!g.expanded)continue;if(c.id==ClearHour&&g.selected<0)continue;if((c.id==PreviousPage||c.id==NextPage)&&g.view.apps.size()<=3)continue;
+        for(auto& c:controls){if(c.details&&!g.expanded)continue;if(c.id==ClearHour&&g.selected<0&&!g.appSelected)continue;if((c.id==PreviousPage||c.id==NextPage)&&g.view.Pages()<=1)continue;
             auto state=gr.Save();gr.TranslateTransform(float(Px(c.x)),float(Px(c.y)));gr.ScaleTransform(g.scale,g.scale);DrawButton(gr,c.id,float(c.w),float(c.h));gr.Restore(state);}
         if(demo){Graphics mark(&image);mark.ScaleTransform(g.scale,g.scale);TextAt(mark,L"SAMPLE",125,21,55,0,MUTED);}
         wstring name=demo?L"sample-":L"live-";name+=expanded?L"expanded.png":L"compact.png";
         if(image.Save((folder+L"\\"+name).c_str(),&cls,nullptr)!=Ok)return 1;
+    }
+    {
+        // Tray glyph preview, enlarged 4x: rows are dark/light taskbars; columns are states x sizes.
+        const int sizes[]={16,20,24,32};const std::tuple<int,uint8_t,bool> states[]={{76,Battery,false},{100,Plugged,false},{43,Charging,false},{9,Battery,true}};
+        const int cell=136;Bitmap strip(16*cell,2*cell,PixelFormat32bppARGB);Graphics sg(&strip);
+        sg.SetInterpolationMode(InterpolationModeNearestNeighbor);sg.SetPixelOffsetMode(PixelOffsetModeHalf);
+        for(int light=0;light<2;light++){
+            SolidBrush taskbar(light?Color(255,238,238,238):Color(255,32,32,32));sg.FillRectangle(&taskbar,0,light*cell,16*cell,cell);
+            for(int st=0;st<4;st++)for(int si=0;si<4;si++){
+                int size=sizes[si],x=(st*4+si)*cell+(cell-size*4)/2,y=light*cell+(cell-size*4)/2;
+                auto icon=MakeTrayBitmap(size,std::get<0>(states[st]),std::get<1>(states[st]),std::get<2>(states[st]),light!=0);
+                sg.DrawImage(icon.get(),Rect(x,y,size*4,size*4),0,0,size,size,UnitPixel);
+            }
+        }
+        strip.Save((folder+L"\\tray-preview.png").c_str(),&cls,nullptr);
     }
     SaveIcon(folder+L"\\CellBattery.ico");g.scale=oldScale;return 0;
 }
@@ -1319,14 +1752,17 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int){
     if(mode==L"--refresh-to"||mode==L"--refresh"){EfficiencyMode();return ExportEnergy();}
     if(mode==L"--quit"){HWND widget=FindRunningWidget();if(widget)PostMessageW(widget,WM_COMMAND,Quit,0);return 0;}
     if(mode==L"--import"){
-        std::vector<Energy> records;EnergyHeader h;wstring error;
-        if(!ParseEnergy(folder,Now(),records,h,error)){WriteStatus(error);return 1;}
+        std::vector<Energy> records;EnergyHeader h;wstring error;std::vector<AppPath> identities;
+        if(!ParseEnergy(folder,Now(),records,h,error,&identities)){WriteStatus(error);return 1;}
+        WriteAppPaths(data,identities);
         bool saved=AtomicWrite(data+L"\\energy.bin",&h,sizeof(h),records.data(),DWORD(records.size()*sizeof(Energy)));
         WriteStatus(saved?L"":L"Cannot write the app history cache.");return saved?0:1;
     }
     GdiplusStartupInput input;input.SuppressBackgroundThread=TRUE;GdiplusStartupOutput output;ULONG_PTR token=0,hook=0;
     if(GdiplusStartup(&token,&input,&output)!=Ok)return 1;
     if(output.NotificationHook)output.NotificationHook(&hook);Fonts();int result=0;
+    HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE); // Shell icon lookups.
+    ReadAppPaths(data,g.appPaths);
     if(mode==L"--self-test")result=SelfTest(folder);
     else if(mode==L"--desktop-check")result=DesktopCheck(folder);
     else if(mode==L"--render"||mode==L"--render-demo")result=Render(folder,mode==L"--render-demo");
@@ -1345,6 +1781,7 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int){
             if(mutex){ReleaseMutex(mutex);CloseHandle(mutex);}
         }
     }
-    if(g.controller){DestroyWindow(g.controller);g.controller=nullptr;}g.buffer.reset();for(auto& f:g.fonts)f.reset();if(g.icon)DestroyIcon(g.icon);
+    if(g.controller){DestroyWindow(g.controller);g.controller=nullptr;}g.buffer.reset();for(auto& f:g.fonts)f.reset();if(g.icon)DestroyIcon(g.icon);if(g.trayIcon)DestroyIcon(g.trayIcon);
+    g.icons.clear();if(SUCCEEDED(com))CoUninitialize();
     if(output.NotificationUnhook&&hook)output.NotificationUnhook(hook);GdiplusShutdown(token);return result;
 }

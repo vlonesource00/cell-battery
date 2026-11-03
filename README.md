@@ -14,12 +14,22 @@ Interface images are rendered by Cell itself with clearly labelled sample data. 
 
 | What you can check | How it works |
 | --- | --- |
-| Battery level and power state | Native Windows readings, refreshed about every 2 seconds while visible |
-| Time left | Windows ETA when available; otherwise a clearly labelled recent-drain estimate |
-| Energy by app and hour | Windows' existing app-energy records, with battery and plugged-in filters |
-| A clean desktop | About 218 × 218 px at 100% scaling; details extend downward at the same width |
+| Battery level and power state | Native Windows readings, refreshed about every 2 seconds while visible; red when low |
+| Time left / time to full | Windows ETA when available; otherwise a clearly labelled recent-drain estimate. While charging, an estimated time to full |
+| Battery health | Health (full-charge vs design capacity), stored energy and charge cycles |
+| 24-hour battery curve | Hover any point to read the time, level and power state |
+| Energy by app and hour | Windows' existing app-energy records with real app icons, battery / plugged-in filters, hour selection and a per-app hourly overlay |
+| Tray icon | Live battery percentage that follows your light or dark taskbar |
+| A clean desktop | About 218 × 256 px at 100% scaling; details extend downward at the same width |
 | Desktop pin | Keep Cell behind normal app windows, alongside desktop icons |
 | Hourly history | Optional one-time admin setup; subsequent hourly and on-demand refreshes run without prompts |
+
+## What's new in 1.2
+
+- **Energy by app redesign:** app icons from Windows, readable names, a segmented filter, five apps per page, hover readouts on the hourly chart, and click-an-app to see when it used energy.
+- **More battery detail:** health, stored energy and cycle tiles; time to full while charging; "charging paused" when a charge limit holds the battery; low-battery colouring.
+- **Live tray percentage** and a hoverable 24-hour battery curve with a complete legend.
+- **Fixes:** history no longer breaks into fragments while hidden; plugged-in is blue everywhere (amber only means charging); a refresh can no longer get stuck if Explorer restarts; no permanent "warming up" label on batteries that cannot report a drain trend.
 
 ## Measured resource use
 
@@ -53,6 +63,6 @@ Windows x64, MSVC C++ Build Tools, and a Windows SDK are needed to build. No add
 Start-Process .\CellBattery.exe -ArgumentList '--self-test "build\checks"' -Wait
 ```
 
-**56 native checks passed**, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
+**68 native checks passed** in version 1.2.0, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
 
 The header illustration was generated with AI. Interface renders and performance charts were produced separately from the application and measured data. [Visual provenance](docs/VISUALS.md)

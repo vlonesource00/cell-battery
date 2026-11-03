@@ -39,11 +39,11 @@ PASS A malformed scheduled cache preserves the current app history
 PASS Connect observed battery samples
 PASS Never interpolate across suspension or unobserved gaps
 PASS Long sampling gaps remain blank
-PASS Native compact client has fixed square dimensions
+PASS Native compact client has fixed dimensions
 PASS Expansion keeps the compact width and extends downward
 PASS Keyboard-accessible native button controls include desktop pin
 PASS Compact widget is twenty percent smaller at the current display DPI
-PASS Every detail control fits below the compact square
+PASS Every detail control fits below the compact panel
 PASS Desktop pin preserves screen position and attaches the widget as a child
 PASS Hidden top-level controller stays reachable while the widget is pinned
 PASS Unpin restores a normal floating window and its position
@@ -54,5 +54,17 @@ PASS Hidden widget reduces sampling to five minutes
 PASS No sampling timer while display is off
 PASS No sampling timer while session is locked
 PASS No sampling timer during suspension
+PASS Charging shows a time-to-full estimate
+PASS Plugged in below full is reported as paused charging
+PASS Low battery state is flagged at or below the threshold
+PASS Battery health is full-charge over design capacity
+PASS Tray glyph renders at small-icon size
+PASS App names are tidied for display without mangling versions
+PASS Packaged apps and paths map to shell icon sources
+PASS SRUM device paths convert to drive-letter paths
+PASS App identities round-trip through apps.bin and exclude unattributed energy
+PASS Five apps per page and the page clamps to the last one
+PASS Chart follows the source filter and overlays the selected app
+PASS Chart hover finds the nearest sample and ignores unrecorded time
 
-56 passed, 0 failed.
+68 passed, 0 failed.

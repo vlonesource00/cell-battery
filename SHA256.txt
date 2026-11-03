@@ -1,1 +1,1 @@
-ca1240671dbfcc721719a1293d922acbfbdf48bd3d99da9d6ab8ce3ccafd0b3f  CellBattery.exe
+ac39e200d74805df3a019d6405b85f482e6a7890752d98b693998139f632a21f  CellBattery.exe

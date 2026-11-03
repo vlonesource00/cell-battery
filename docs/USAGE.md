@@ -2,18 +2,20 @@
 
 A small, portable Windows battery widget, built in native C++.
 
-Double-click **CellBattery.exe**. No installation or extra runtime is required. Drag the title area to move it. At 100% Windows scaling the compact widget is approximately **218 × 218 pixels**, about 20% smaller in each dimension than the original. The arrow opens app usage **downward**, keeping the same width and growing to approximately **218 × 435 pixels**. Its position shifts to keep the expanded view inside the monitor's usable area.
+Double-click **CellBattery.exe**. No installation or extra runtime is required. Drag the title area to move it. At 100% Windows scaling the compact widget is approximately **218 × 256 pixels**. The arrow opens app usage **downward**, keeping the same width and growing to approximately **218 × 536 pixels**. Its position shifts to keep the expanded view inside the monitor's usable area.
 
 ## Controls
 
 - **Arrow:** expand or collapse app usage.
 - **Pin beside …:** attach Cell to the desktop alongside your icons, behind normal app windows. Click again to return to a floating widget. The highlighted pin indicates that desktop attachment is active. You can still drag the title to move it.
 - **Battery / Plugged in / All:** choose which Windows energy records to show.
-- **Hourly bars:** select a recorded hour; the small × returns to all 24 clock hours.
-- **Mouse wheel or page arrows:** browse the remaining apps, three at a time.
+- **Hourly bars:** hover to see an hour's share of the day; click to filter the app list to that hour. Click it again, or the small ×, to return to all 24 clock hours.
+- **App rows:** click an app to highlight its hourly energy on the chart; click it again, or the ×, to clear it.
+- **Mouse wheel or page arrows:** browse the remaining apps, five at a time. The footer shows the page.
+- **24-hour battery curve:** hover to read the time, level and power state of the nearest recorded sample.
 - **↻ or F5:** refresh Windows' saved app-energy history. With hourly setup enabled, this requests the scheduled job without a prompt. Otherwise Windows asks for administrator consent for a temporary exporter; the widget itself runs as a normal user.
 - **… or right-click:** pin to desktop, keep a floating widget above other windows, optionally start with Windows, open Windows battery settings, hide to tray, or exit. The tray menu also lets you unpin while other apps cover the desktop.
-- **Tray icon:** restore the widget. Alt+F4 hides it; use **Exit Cell** to stop it completely.
+- **Tray icon:** shows the live battery percentage over a small level bar (red at 20% or below on battery) and follows the light or dark taskbar theme. Click it to restore the widget. Alt+F4 hides it; use **Exit Cell** to stop it completely.
 - **Tab / Shift+Tab / Space:** navigate and activate native button controls. Escape collapses the details, then hides the widget.
 
 Desktop pinning, startup, and always-on-top are initially off on a fresh setup. Desktop pinning is remembered across runs; the widget returns to its floating mode when you unpin it. If Explorer is still loading, attachment retries briefly. If the desktop host is unavailable, Cell remains usable as a floating window. Rounded corners are retained in both modes; Windows supplies a shadow for the floating window.
@@ -26,7 +28,11 @@ Battery percentage and charging state come from Windows. Visible readings refres
 
 On battery, Cell collects a bounded, in-memory trend from the battery's remaining energy. After at least a minute and enough distinct capacity changes, wattage becomes a **recent 1–2 minute capacity-loss average**. This is useful on this HP laptop, where the Windows-reported rate disagreed substantially with the observed loss of stored charge. It is an estimate from the battery gauge, not an instantaneous electrical measurement. Allow 1–2 minutes for a workload or brightness change to settle into the average.
 
-Remaining time prefers **Windows' own ETA** whenever available. Otherwise it uses recent drain, labelled **Recent drain (1–2 min) · estimated ETA**. During warmup, or when the device cannot provide enough reliable capacity observations, it falls back to Windows' reported discharge rate, labelled **Reported-rate estimate · warming up**. Without either input, it says **Estimating**. Charging does not show a fabricated time to full. **… → Battery reading details** explains the active readings and shows the Windows-reported rate separately.
+Remaining time prefers **Windows' own ETA** whenever available. Otherwise it uses recent drain, labelled **From the last 1–2 min of drain**. During warmup it falls back to Windows' reported discharge rate, labelled **From reported rate · refining…**; on devices that cannot provide reliable capacity observations the label is **From Windows' reported discharge rate**. Without either input, it says **Estimating**. The wattage sign shows direction: **+** while charging, **−** on battery.
+
+While charging, **Full in …** is a linear estimate from the current charge rate and the remaining capacity; charging normally slows near full, so treat it as a lower bound. Plugged in below 100% without charging is shown as **Charging paused** (typically a charge limit or smart charging). **… → Battery reading details** explains the active readings and shows the Windows-reported rate separately.
+
+The three tiles show **Health** (full-charge capacity as a share of design capacity), **Stored** energy in Wh, and **Cycles** (or full-charge capacity when the battery does not report a cycle count). Battery details are read briefly at start, on power-source changes and hourly; no handle stays open.
 
 The recent trend resets on charging, rising capacity, missing readings, or a sampling gap. It is not persisted or reused after sleep. Direct capacity estimation requires one readable system battery reporting absolute energy units; other configurations retain the Windows reading. None of the estimates is a guarantee of remaining runtime.
 
@@ -34,7 +40,9 @@ The small 24-hour battery curve records observations while Cell is running. **Gr
 
 The expanded panel uses the Energy Estimation data Windows already collects, exported by `powercfg /srumutil`. It shows the latest 24 clock-hour buckets in that export. Hour labels use your local Windows time; the current hour can be incomplete. These are the times Windows recorded each aggregate, not exact app start and stop times. Daylight-saving changes may repeat or skip a displayed clock hour.
 
-App percentages are **shares of the reported estimated app energy for the selected source and time range**. They are not percentage points of battery charge lost. Windows' estimates do not account for every hardware drain and need not add up to the battery's actual capacity loss. Windows' unattributed energy is kept outside app shares and shown separately as **Unassigned** in the footer; its percentage uses app plus unattributed estimates as its denominator. Hardware meter domains (`EMI_*`) are excluded because they are not apps and can overlap. Plugged-in app energy is separate from energy stored in the battery while charging. Records whose power source is unknown appear only under **All** and use blue chart segments. Identical executable filenames in different paths remain separate identities.
+App percentages are **shares of the reported estimated app energy for the selected source and time range**. They are not percentage points of battery charge lost. Windows' estimates do not account for every hardware drain and need not add up to the battery's actual capacity loss. Windows' unattributed energy is kept outside app shares and shown separately in the footer as **… not assigned to an app**; its percentage uses app plus unattributed estimates as its denominator. Hardware meter domains (`EMI_*`) are excluded because they are not apps and can overlap. Plugged-in app energy is separate from energy stored in the battery while charging. The hourly chart follows the selected filter: green for on battery, blue for plugged in, and, under **All**, grey for records whose power source is unknown.
+
+App icons come from the Windows shell, using the path or packaged-app id Windows records for each app, and are kept in a small `apps.bin` beside the cache. Apps without a resolvable icon get a coloured initial. Packaged names such as `Mozilla.Firefox` are shown as `Firefox`. Icons appear after the first refresh with this version; with hourly setup, re-run **Enable-hourly-history.cmd** once so the scheduled helper is updated too. Identical executable filenames in different paths remain separate identities.
 
 App data refreshes **hourly after optional one-time setup**, and can also be requested on demand. Without hourly setup, refreshes are manual and require administrator consent. Windows may publish its aggregates late. The footer shows when the cache was refreshed. If an export is denied, unavailable, or malformed, Cell keeps the previous cache and explains the issue in **… → Show refresh details**. Battery display and local battery history continue to work. **Open Windows battery settings** is available when Windows cannot provide an export.
 
