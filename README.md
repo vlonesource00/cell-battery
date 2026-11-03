@@ -18,11 +18,20 @@ Interface images are rendered by Cell itself with clearly labelled sample data. 
 | Time left / time to full | Windows ETA when available; otherwise a clearly labelled recent-drain estimate. While charging, an estimated time to full |
 | Battery health | Health (full-charge vs design capacity), stored energy and charge cycles |
 | 24-hour battery curve | Hover any point to read the time, level and power state |
-| Energy by app and hour | Windows' existing app-energy records with real app icons, battery / plugged-in filters, hour selection and a per-app hourly overlay |
+| Energy by app and hour | Windows' existing app-energy records in Wh and % of a charge, with app icons, a CPU/screen/network breakdown, filters, hour selection and a per-app hourly overlay |
+| How much Windows explains | Cell measures the battery's real hourly loss and shows it next to what Windows attributed to apps |
+| Right now | A live tab with battery draw over 5 minutes and the top apps by CPU time, no admin or waiting |
 | Tray icon | Live battery percentage that follows your light or dark taskbar |
 | A clean desktop | About 218 × 256 px at 100% scaling; details extend downward at the same width |
 | Desktop pin | Keep Cell behind normal app windows, alongside desktop icons |
 | Hourly history | Optional one-time admin setup; subsequent hourly and on-demand refreshes run without prompts |
+
+## What's new in 1.3
+
+- **Measured drain vs. Windows' estimates:** Cell now records how much energy the battery really loses each hour and draws it as an outline behind the app bars. Windows' per-app records can cover only a small part of real drain (on the development laptop as little as 7% in one hour), and the panel now says so instead of implying app shares explain everything.
+- **Absolute and detailed app energy:** Wh per app, "% of a full charge", and where an app's energy went (CPU, screen, network, disk, GPU) when Windows reports it. Executables of one product are merged.
+- **Now tab:** live battery draw and top apps by CPU time over the last 30 s, sampled only while the tab is open.
+- **Honest freshness:** the footer shows the newest Windows record ("data through 16:00"), not just when the cache was refreshed.
 
 ## What's new in 1.2
 
@@ -63,6 +72,6 @@ Windows x64, MSVC C++ Build Tools, and a Windows SDK are needed to build. No add
 Start-Process .\CellBattery.exe -ArgumentList '--self-test "build\checks"' -Wait
 ```
 
-**68 native checks passed** in version 1.2.0, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
+**75 native checks passed** in version 1.3.0, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
 
 The header illustration was generated with AI. Interface renders and performance charts were produced separately from the application and measured data. [Visual provenance](docs/VISUALS.md)

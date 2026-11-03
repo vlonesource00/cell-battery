@@ -65,6 +65,13 @@ PASS SRUM device paths convert to drive-letter paths
 PASS App identities round-trip through apps.bin and exclude unattributed energy
 PASS Five apps per page and the page clamps to the last one
 PASS Chart follows the source filter and overlays the selected app
+PASS Executables of one product merge, keeping their component breakdown
+PASS Component energy is kept as detail; a blank component does not reject the row
+PASS Version 1 caches load and are upgraded in memory
+PASS Measured battery loss is spread across the hours it spanned
+PASS Charging restarts measurement instead of counting the gain
+PASS Live sampler measures per-app CPU time from one system snapshot
+PASS Leaving the live tab frees its buffers
 PASS Chart hover finds the nearest sample and ignores unrecorded time
 
-68 passed, 0 failed.
+75 passed, 0 failed.

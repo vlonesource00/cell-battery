@@ -1,8 +1,8 @@
 #include <windows.h>
 1 RT_MANIFEST "CellBattery.manifest"
 1 VERSIONINFO
- FILEVERSION 1,2,0,0
- PRODUCTVERSION 1,2,0,0
+ FILEVERSION 1,3,0,0
+ PRODUCTVERSION 1,3,0,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -12,7 +12,7 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "Cell battery widget\0"
    VALUE "ProductName", "Cell\0"
-   VALUE "FileVersion", "1.2.0\0"
+   VALUE "FileVersion", "1.3.0\0"
    VALUE "OriginalFilename", "CellBattery.exe\0"
   END
  END
