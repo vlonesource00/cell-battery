@@ -2,11 +2,15 @@
 
 A small, portable Windows battery widget, built in native C++.
 
-Double-click **CellBattery.exe**. No installation or extra runtime is required. Drag the title area to move it. At 100% Windows scaling the compact widget is approximately **218 × 256 pixels**. The arrow opens app usage **downward**, keeping the same width and growing to approximately **218 × 536 pixels**. Its position shifts to keep the expanded view inside the monitor's usable area.
+Double-click **CellBattery.exe**. No installation or extra runtime is required. Drag the title area to move it. Cell is one card that never changes size: approximately **276 × 444 pixels** at 100% Windows scaling (Medium); **… → Size** offers Small and Large. It follows Windows' light or dark app mode.
 
 ## Controls
 
-- **Arrow:** expand or collapse app usage.
+- **Tabs:** Battery, Apps, Now and Week. Left and right arrow keys switch tabs.
+- **Taskbar pill:** Cell shows its battery, percentage and time left in the taskbar, left of the tray (two lines on taller taskbars, one line on slim ones). Hover for the battery card; click to show or hide Cell; right-click for the menu. Turn it off with **… → Show in taskbar**. While the pill is shown, the tray keeps the plain Cell icon. If the taskbar can't host it (vertical taskbar, Explorer restarting), Cell retries every few seconds and the tray icon shows the percentage meanwhile.
+- **Battery tab:** the ring shows the level and time left; beside it, the live draw with a 5-minute sparkline. Below: a time-left range from how much the draw moved recently, Health, change since unplugging (or plugging in), how long a full charge lasts at your usual use, and the 24-hour curve.
+- **Week tab:** measured battery use per day, your usual draw on battery, and the 7-day level curve.
+- **Alerts (… → Alerts):** off by default. Unplug reminder when charging passes 80%, low battery at 20%, and unusually high drain (more than twice your usual draw). They fire once on crossing, as quiet Windows notifications.
 - **Pin beside …:** attach Cell to the desktop alongside your icons, behind normal app windows. Click again to return to a floating widget. The highlighted pin indicates that desktop attachment is active. You can still drag the title to move it.
 - **On battery / Plugged in / All:** choose which Windows energy records to show. The chart and list follow the choice.
 - **Now:** live view that needs no refresh: battery draw over the last 5 minutes and the apps using the most CPU over the last 30 seconds. It samples every 4 seconds only while the tab is open, and stores nothing.
@@ -17,7 +21,7 @@ Double-click **CellBattery.exe**. No installation or extra runtime is required. 
 - **↻ or F5:** refresh Windows' saved app-energy history. With hourly setup enabled, this requests the scheduled job without a prompt. Otherwise Windows asks for administrator consent for a temporary exporter; the widget itself runs as a normal user.
 - **… or right-click:** pin to desktop, keep a floating widget above other windows, optionally start with Windows, open Windows battery settings, hide to tray, or exit. The tray menu also lets you unpin while other apps cover the desktop.
 - **Tray icon:** shows the live battery percentage over a small level bar (red at 20% or below on battery) and follows the light or dark taskbar theme. Click it to restore the widget. Alt+F4 hides it; use **Exit Cell** to stop it completely.
-- **Tab / Shift+Tab / Space:** navigate and activate native button controls. Escape collapses the details, then hides the widget.
+- **Tab / Shift+Tab / Space:** navigate and activate native button controls. Escape hides the widget.
 
 Desktop pinning, startup, and always-on-top are initially off on a fresh setup. Desktop pinning is remembered across runs; the widget returns to its floating mode when you unpin it. If Explorer is still loading, attachment retries briefly. If the desktop host is unavailable, Cell remains usable as a floating window. Rounded corners are retained in both modes; Windows supplies a shadow for the floating window.
 
@@ -37,7 +41,7 @@ The three tiles show **Health** (full-charge capacity as a share of design capac
 
 The recent trend resets on charging, rising capacity, missing readings, or a sampling gap. It is not persisted or reused after sleep. Direct capacity estimation requires one readable system battery reporting absolute energy units; other configurations retain the Windows reading. None of the estimates is a guarantee of remaining runtime.
 
-The small 24-hour battery curve records observations while Cell is running. **Green = on battery, amber = charging, blue = plugged in without charging.** History starts when you first run Cell. Sleep, screen-off, locked-session, and closed-app gaps stay blank; they are not assigned to an app or interpolated. Battery level is sampled at five-minute intervals, plus power-source changes, and retained for seven days.
+The 24-hour battery curve records observations while Cell is running. Sleep, screen-off and closed-app gaps up to 6 hours are bridged by a faint dashed line so the trend stays readable; no samples are invented. **Green = on battery, amber = charging, blue = plugged in without charging.** History starts when you first run Cell. Sleep, screen-off, locked-session, and closed-app gaps stay blank; they are not assigned to an app or interpolated. Battery level is sampled at five-minute intervals, plus power-source changes, and retained for seven days.
 
 The expanded panel uses the Energy Estimation data Windows already collects, exported by `powercfg /srumutil`. It shows the latest 24 clock-hour buckets in that export. Hour labels use your local Windows time; the current hour can be incomplete. These are the times Windows recorded each aggregate, not exact app start and stop times. Daylight-saving changes may repeat or skip a displayed clock hour.
 

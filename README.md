@@ -4,11 +4,17 @@ Battery level, a labelled runtime estimate, and Windows' app-energy history in o
 
 **[Download Cell for Windows x64](downloads/CellBattery.zip?raw=1)** · [Usage and setup](docs/USAGE.md) · [Measured results](docs/VERIFICATION.md) · [Source](source/CellBattery.cpp)
 
-Cell is for laptop work: a quick battery check while studying, watching a lecture, or moving between desks. It stays compact, can sit with your desktop icons, and expands only when you want the details.
+Cell is for laptop work: a quick battery check while studying, watching a lecture, or moving between desks. It lives in your taskbar as a small pill, opens as one compact card, and can sit with your desktop icons.
 
-## A small view, with details underneath
+## One card, four tabs, and a taskbar pill
 
-<table><tr><td valign="top" width="50%"><strong>Compact</strong><br><br><img src="docs/assets/compact.png" width="272" alt="Cell compact view with battery level, estimated time and desktop pin"></td><td valign="top" width="50%"><strong>Expanded downward</strong><br><br><img src="docs/assets/expanded.png" width="272" alt="Cell app-energy panel expanded below the compact widget"></td></tr></table>
+<table><tr>
+<td valign="top" width="33%"><strong>Battery</strong><br><br><img src="docs/assets/compact.png" width="240" alt="Battery tab: level ring, live draw, time-left range, health and 24-hour curve"></td>
+<td valign="top" width="33%"><strong>Apps</strong><br><br><img src="docs/assets/expanded.png" width="240" alt="Apps tab: Windows app energy by hour with measured battery loss and app list"></td>
+<td valign="top" width="33%"><strong>Week</strong><br><br><img src="docs/assets/week.png" width="240" alt="Week tab: measured battery use per day and 7-day level curve"></td>
+</tr></table>
+
+<img src="docs/assets/taskbar.png" width="600" alt="Taskbar pill on dark and light taskbars, one-line and two-line sizes">
 
 Interface images are rendered by Cell itself with clearly labelled sample data. They show the actual layout, not generated UI mockups.
 
@@ -21,10 +27,20 @@ Interface images are rendered by Cell itself with clearly labelled sample data. 
 | Energy by app and hour | Windows' existing app-energy records in Wh and % of a charge, with app icons, a CPU/screen/network breakdown, filters, hour selection and a per-app hourly overlay |
 | How much Windows explains | Cell measures the battery's real hourly loss and shows it next to what Windows attributed to apps |
 | Right now | A live tab with battery draw over 5 minutes and the top apps by CPU time, no admin or waiting |
-| Tray icon | Live battery percentage that follows your light or dark taskbar |
-| A clean desktop | About 218 × 256 px at 100% scaling; details extend downward at the same width |
+| Taskbar pill | Battery, percentage and time left beside the tray; hover for the full card, click to open Cell |
+| Week | Measured battery use per day, your usual draw, and how long a full charge lasts at your usual use |
+| Alerts (opt-in) | Unplug at 80%, low battery at 20%, and unusually high drain |
+| A clean desktop | One fixed card, about 276 × 444 px at 100% scaling (Medium); Small and Large sizes in the menu; follows light or dark mode |
 | Desktop pin | Keep Cell behind normal app windows, alongside desktop icons |
 | Hourly history | Optional one-time admin setup; subsequent hourly and on-demand refreshes run without prompts |
+
+## What's new in 1.4
+
+- **Full visual rework:** a ring gauge, a live draw sparkline, a time-left range, and tabs (Battery, Apps, Now, Week) in one fixed card instead of a tall drop-down. Larger text, three sizes, light and dark themes.
+- **Taskbar pill:** Cell sits in the taskbar next to the tray; hover for the card, click to open it. It adapts to taskbar height and theme and falls back to the tray icon when the taskbar can't host it.
+- **Better readings:** since-unplug change, how long a full charge lasts at your usual use (from measured drain), and a more readable 24-hour curve that bridges sleep gaps with a dashed line instead of leaving fragments.
+- **Week tab** and **opt-in alerts**.
+- **Fix:** buttons no longer show classic grey bevels on their edges.
 
 ## What's new in 1.3
 
@@ -53,7 +69,7 @@ Cell uses native C++ and Win32/GDI+: one resident widget process, a blocking mes
 ## Get started
 
 1. [Download the portable ZIP](downloads/CellBattery.zip?raw=1) and extract it to a writable folder.
-2. Open **CellBattery.exe**. Drag the title to position it; use the arrow for details and the pin for desktop mode.
+2. Open **CellBattery.exe**. Cell appears in your taskbar and as a card; drag the card's title to move it, switch tabs for details, and use the pin for desktop mode.
 3. For automatic app history, run **Enable-hourly-history.cmd** once and approve Windows' setup prompt. Future refreshes use Task Scheduler silently, including the refresh button. No password is stored and the task does not wake your laptop.
 4. Optionally enable **Start with Windows** from the **…** menu.
 
@@ -72,6 +88,6 @@ Windows x64, MSVC C++ Build Tools, and a Windows SDK are needed to build. No add
 Start-Process .\CellBattery.exe -ArgumentList '--self-test "build\checks"' -Wait
 ```
 
-**75 native checks passed** in version 1.3.0, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
+**84 native checks passed** in version 1.4.0, plus actual desktop attachment/detachment and silent scheduled-refresh checks. [Full verification](docs/VERIFICATION.md)
 
 The header illustration was generated with AI. Interface renders and performance charts were produced separately from the application and measured data. [Visual provenance](docs/VISUALS.md)

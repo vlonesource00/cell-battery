@@ -10,8 +10,9 @@ PASS Insufficient capacity resolution keeps the reported-rate fallback
 PASS Rising capacity resets a discharge trend
 PASS A long observation stream remains bounded to the recent two-minute window
 PASS Unavailable capacity clears the recent estimate
-PASS Existing preferences migrate without losing position or display choices
-PASS Desktop pin preference survives a save and reload
+PASS Oldest preferences migrate; expanded app usage opens on the Apps tab
+PASS Version 2 preferences migrate with the desktop pin and alerts off
+PASS Tab, taskbar and alert choices survive a save and reload
 PASS SRUM UTC timestamp round trip
 PASS Reject invalid timestamps
 PASS Explicit timezone offsets
@@ -39,15 +40,15 @@ PASS A malformed scheduled cache preserves the current app history
 PASS Connect observed battery samples
 PASS Never interpolate across suspension or unobserved gaps
 PASS Long sampling gaps remain blank
-PASS Native compact client has fixed dimensions
-PASS Expansion keeps the compact width and extends downward
-PASS Keyboard-accessible native button controls include desktop pin
-PASS Compact widget is twenty percent smaller at the current display DPI
-PASS Every detail control fits below the compact panel
+PASS The card has fixed dimensions at the display DPI
+PASS Switching tabs never resizes the card
+PASS Keyboard-accessible native button controls include tabs and desktop pin
+PASS Controls follow the active tab
+PASS Every control fits inside the card
 PASS Desktop pin preserves screen position and attaches the widget as a child
 PASS Hidden top-level controller stays reachable while the widget is pinned
 PASS Unpin restores a normal floating window and its position
-PASS Partial wattage redraw exactly matches a full render
+PASS Partial draw-column redraw exactly matches a full render
 PASS Visible widget uses the live two-second coalesced timer
 PASS Actual Windows timer delivers repeated live power samples
 PASS Hidden widget reduces sampling to five minutes
@@ -59,6 +60,14 @@ PASS Plugged in below full is reported as paused charging
 PASS Low battery state is flagged at or below the threshold
 PASS Battery health is full-charge over design capacity
 PASS Tray glyph renders at small-icon size
+PASS Time-left range spans the recent spread of draw
+PASS No range until about a minute of draw has been seen
+PASS Since-unplug starts at the last switch to battery
+PASS Usual draw comes from Cell's measured drain
+PASS The week view counts every measured hour once
+PASS Alerts fire once on crossing 80% while charging and 20% on battery
+PASS Alerts stay quiet unless switched on
+PASS Taskbar pill draws its battery and text on a transparent background
 PASS App names are tidied for display without mangling versions
 PASS Packaged apps and paths map to shell icon sources
 PASS SRUM device paths convert to drive-letter paths
@@ -74,4 +83,4 @@ PASS Live sampler measures per-app CPU time from one system snapshot
 PASS Leaving the live tab frees its buffers
 PASS Chart hover finds the nearest sample and ignores unrecorded time
 
-75 passed, 0 failed.
+84 passed, 0 failed.
