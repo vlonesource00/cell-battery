@@ -11,7 +11,7 @@ Double-click **CellBattery.exe**. No installation or extra runtime is required. 
 - **Battery tab:** the ring shows the level and time left; beside it, the live draw with a 5-minute sparkline. Below: a time-left range from how much the draw moved recently, Health, change since unplugging (or plugging in), how long a full charge lasts at your usual use, and the 24-hour curve.
 - **Week tab:** measured battery use per day, your usual draw on battery, and the 7-day level curve.
 - **Alerts (… → Alerts):** off by default. Unplug reminder when charging passes 80%, low battery at 20%, and unusually high drain (more than twice your usual draw). They fire once on crossing, as quiet Windows notifications.
-- **Pin beside …:** attach Cell to the desktop alongside your icons, behind normal app windows. Click again to return to a floating widget. The highlighted pin indicates that desktop attachment is active. You can still drag the title to move it.
+- **Pin beside …:** attach Cell to the desktop alongside your icons, behind normal app windows. Click again to return to a floating widget. The highlighted pin indicates that desktop attachment is active, and the position is locked while pinned so it can't be nudged by accident. Unpin to move it, then pin again.
 - **On battery / Plugged in / All:** choose which Windows energy records to show. The chart and list follow the choice.
 - **Now:** live view that needs no refresh: battery draw over the last 5 minutes and the apps using the most CPU over the last 30 seconds. It samples every 4 seconds only while the tab is open, and stores nothing.
 - **Hourly bars:** hover to see an hour's share of the day; click to filter the app list to that hour. Click it again, or the small ×, to return to all 24 clock hours.
