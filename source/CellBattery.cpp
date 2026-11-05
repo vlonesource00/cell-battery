@@ -228,10 +228,9 @@ struct State {
     float scale=1;
     bool expanded=false,top=false,hidden=false,displayOn=true,locked=false,suspended=false;
     bool refreshing=false,timer=false,dirty=false,readOnly=false,historyGap=true;
-    bool desktop=false,desktopWanted=false,quitting=false,dragging=false;
+    bool desktop=false,desktopWanted=false,quitting=false;
     bool hourlyAvailable=false,scheduledPending=false;
     unsigned desktopRetries=0;
-    POINT dragStart{};RECT dragRect{};
     UINT timerInterval=0;
     uint64_t powerReads=0;
     Power power;
@@ -1388,7 +1387,7 @@ wstring ButtonCaption(int id){
     switch(id){case Menu:return L"Menu";case Refresh:return g.hourlyAvailable?L"Refresh Windows app history":L"Refresh Windows app history (administrator consent)";
     case FilterBattery:return L"Battery";case FilterPlugged:return L"Plugged";case FilterAll:return L"All";case ClearHour:return L"Clear selection";
     case TabBattery:return L"Battery";case TabApps:return L"Apps";case TabNow:return L"Now";case TabWeek:return L"Week";
-    case PreviousPage:return L"Previous apps";case NextPage:return L"Next apps";case DesktopPin:return g.desktopWanted?L"Unpin from desktop":L"Pin to desktop (behind app windows)";}return L"";
+    case PreviousPage:return L"Previous apps";case NextPage:return L"Next apps";case DesktopPin:return g.desktopWanted?L"Unpin to move Cell (position is locked while pinned)":L"Pin to desktop: stays behind app windows, position locked";}return L"";
 }
 bool IsTab(int id){return id>=TabBattery&&id<=TabWeek;}
 bool IsFilter(int id){return id==FilterBattery||id==FilterPlugged||id==FilterAll;}
@@ -2000,17 +1999,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         }break;
     }
     case WM_COMMAND:if(HIWORD(wp)==BN_CLICKED)Act(LOWORD(wp));return 0;
-    case WM_LBUTTONDOWN:
-        if(g.desktop&&GET_Y_LPARAM(lp)<Px(40)&&GET_X_LPARAM(lp)<Px(170)){
-            g.dragging=true;GetCursorPos(&g.dragStart);GetWindowRect(hwnd,&g.dragRect);SetCapture(hwnd);
-        }return 0;
+    case WM_LBUTTONDOWN:return 0; // Pinned to the desktop, the position is locked; unpin to move it.
     case WM_MOUSEMOVE:{
-        if(g.dragging){
-            POINT cursor{};GetCursorPos(&cursor);POINT position{g.dragRect.left+cursor.x-g.dragStart.x,g.dragRect.top+cursor.y-g.dragStart.y};
-            MapWindowPoints(nullptr,g.desktopHost,&position,1);
-            SetWindowPos(hwnd,nullptr,position.x,position.y,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-            return 0;
-        }
         // Battery tab: hovering the 24h chart reads out the nearest recorded sample in the legend row.
         float x=GET_X_LPARAM(lp)/g.scale,y=GET_Y_LPARAM(lp)/g.scale;
         bool over=g.tab==0&&x>=CHART_X-2&&x<=CHART_X+CHART_W+2&&y>=CHART_Y-6&&y<=CHART_Y+CHART_H+4;
@@ -2045,9 +2035,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
                 COLORREF border=RGB(LINE.GetR(),LINE.GetG(),LINE.GetB());DwmSetWindowAttribute(hwnd,34,&border,sizeof(border));Redraw();}
         }
         break;
-    case WM_CAPTURECHANGED:g.dragging=false;return 0;
     case WM_LBUTTONUP:{
-        if(g.dragging){g.dragging=false;ReleaseCapture();ResizeWidget();SavePrefs();return 0;}
         float x=GET_X_LPARAM(lp)/g.scale,y=GET_Y_LPARAM(lp)/g.scale;
         if(g.tab==1&&y>=U_CHART_Y-4&&y<=U_CHART_Y+U_CHART_H+2&&UsageHourAt(x)>=0){
             int hour=UsageHourAt(x);g.selected=g.selected==hour?-1:hour; // Clicking the selected hour clears it.
